@@ -66,12 +66,12 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     CURRENT_PATH = os.path.dirname(os.path.realpath(__file__))
 
     spawn_pos_tissue = Gf.Vec3f(0.0, 0.30, 0.0)
-    spawn_pos_fluid = spawn_pos_tissue + Gf.Vec3f(0.0, 0.0, 0.10)
+    spawn_pos_fluid = spawn_pos_tissue + Gf.Vec3f(0.0, 0.0, 0.05)
     spawn_pos_glass2 = Gf.Vec3f(0.0, 0.70, 0.01)
     glass2_particle_height = 0.03
 
     tissue_setup = UsdFileCfg(
-        usd_path=f"{CURRENT_PATH}/usd_models/try_blood/whole_sence2_3.usd",
+        usd_path=f"{CURRENT_PATH}/usd_models/whole_sence.usd",
         scale=(1.0, 1.0, 1.0),
         rigid_props=RigidBodyPropertiesCfg(
             disable_gravity=True,
@@ -91,7 +91,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/Glass2",
         init_state=RigidObjectCfg.InitialStateCfg(pos=spawn_pos_glass2, rot=[1, 0, 0, 0]),
         spawn=UsdFileCfg(
-            usd_path=f"{CURRENT_PATH}/usd_models/Tall_Glass_5.usd",
+            usd_path=f"{CURRENT_PATH}/usd_models/Tall_Glass.usd",
             semantic_tags=[("class", "Glass2")],
             scale=(0.01, 0.01, 0.01),
             rigid_props=RigidBodyPropertiesCfg(

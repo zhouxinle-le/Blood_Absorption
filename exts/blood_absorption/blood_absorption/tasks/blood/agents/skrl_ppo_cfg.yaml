@@ -13,34 +13,54 @@ models:
     max_log_std: 2.0
     initial_log_std: 0.0
     network:
-      - name: features_extractor
-        input: STATES["camera"] # PyTorch NHWC -> NCHW (Already swapped from env)
-        layers:
-          - conv2d: {out_channels: 32, kernel_size: 10, stride: 5, padding: 0}
-          - conv2d: {out_channels: 64, kernel_size: 5, stride: 3, padding: 0}
-          - conv2d: {out_channels: 64, kernel_size: 4, stride: 2, padding: 0}
-          - flatten
-        activations: relu
+      # Legacy image + low-dimensional hybrid policy kept for reference.
+      # Enable this again only if the environment returns:
+      # {"policy": {"camera": ..., "position": ...}}
+      #
+      # - name: features_extractor
+      #   input: STATES["camera"]  # PyTorch NHWC -> NCHW (already swapped from env)
+      #   layers:
+      #     - conv2d: {out_channels: 32, kernel_size: 10, stride: 5, padding: 0}
+      #     - conv2d: {out_channels: 64, kernel_size: 5, stride: 3, padding: 0}
+      #     - conv2d: {out_channels: 64, kernel_size: 4, stride: 2, padding: 0}
+      #     - flatten
+      #   activations: relu
+      # - name: net
+      #   input: concatenate([features_extractor, STATES["position"]])
+      #   layers: [512, 256, 128]
+      #   activations: elu
+      #
+      # Current blood environment returns a single low-dimensional tensor, so
+      # the active policy uses STATES directly.
       - name: net
-        input: concatenate([features_extractor, STATES["position"]])
-        layers: [512, 256, 128]
+        input: STATES
+        layers: [256, 128, 64]
         activations: elu
     output: ACTIONS
   value:  # see deterministic_model parameters
     class: DeterministicMixin
     clip_actions: False
     network:
-      - name: features_extractor
-        input: STATES["camera"]  # PyTorch NHWC -> NCHW (Already swapped from env)
-        layers:
-          - conv2d: {out_channels: 32, kernel_size: 10, stride: 5, padding: 0}
-          - conv2d: {out_channels: 64, kernel_size: 5, stride: 3, padding: 0}
-          - conv2d: {out_channels: 64, kernel_size: 4, stride: 2, padding: 0}
-          - flatten
-        activations: relu
+      # Legacy image + low-dimensional hybrid value network kept for reference.
+      #
+      # - name: features_extractor
+      #   input: STATES["camera"]  # PyTorch NHWC -> NCHW (already swapped from env)
+      #   layers:
+      #     - conv2d: {out_channels: 32, kernel_size: 10, stride: 5, padding: 0}
+      #     - conv2d: {out_channels: 64, kernel_size: 5, stride: 3, padding: 0}
+      #     - conv2d: {out_channels: 64, kernel_size: 4, stride: 2, padding: 0}
+      #     - flatten
+      #   activations: relu
+      # - name: net
+      #   input: concatenate([features_extractor, STATES["position"]])
+      #   layers: [512, 256, 128]
+      #   activations: elu
+      #
+      # Current blood environment returns a single low-dimensional tensor, so
+      # the active value network uses STATES directly.
       - name: net
-        input: concatenate([features_extractor, STATES["position"]])
-        layers: [512, 256, 128]
+        input: STATES
+        layers: [256, 128, 64]
         activations: elu
     output: ONE
 

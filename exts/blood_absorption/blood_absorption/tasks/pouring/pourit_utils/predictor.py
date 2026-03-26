@@ -35,7 +35,7 @@ import matplotlib.pyplot as plt
 import time
 import signal
 
-import rospy
+# import rospy  # ROS dependency - not used
 from std_msgs.msg import Float64MultiArray
 
 
