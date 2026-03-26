@@ -1,77 +1,49 @@
 from __future__ import annotations
 
+import os
+
+import numpy as np
 import torch
 
+from pxr import Gf
 from omni.isaac.core.utils.stage import get_current_stage
-from omni.isaac.core.utils.torch.transformations import tf_combine, tf_inverse, tf_vector
-from pxr import UsdGeom
 
 import omni.isaac.lab.sim as sim_utils
+
 from omni.isaac.lab.actuators.actuator_cfg import ImplicitActuatorCfg
-from omni.isaac.lab.assets import Articulation, ArticulationCfg, AssetBase, AssetBaseCfg
+from omni.isaac.lab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
+from omni.isaac.lab.controllers import DifferentialIKController, DifferentialIKControllerCfg
 from omni.isaac.lab.envs import DirectRLEnv, DirectRLEnvCfg
+from omni.isaac.lab.managers import SceneEntityCfg
 from omni.isaac.lab.scene import InteractiveSceneCfg
-from omni.isaac.lab.sim import SimulationCfg
+from omni.isaac.lab.sensors import ContactSensor, ContactSensorCfg
+from omni.isaac.lab.sim import SimulationCfg, SimulationContext
+from omni.isaac.lab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
+from omni.isaac.lab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from omni.isaac.lab.terrains import TerrainImporterCfg
 from omni.isaac.lab.utils import configclass
-from omni.isaac.lab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
-from omni.isaac.lab.utils.math import sample_uniform
-
-from omni.physx.scripts import physicsUtils, particleUtils, utils
-from pxr import Usd, UsdLux, UsdGeom, Sdf, Gf, Vt, UsdPhysics, PhysxSchema
-import omni.physx.bindings._physx as physx_settings_bindings
-import omni.timeline
-import numpy as np
-import omni.kit.commands
-from omni.physx import acquire_physx_interface
-
-from .fluid_object import FluidObjectCfg, FluidObject
-from omni.isaac.lab.assets import RigidObject, RigidObjectCfg
-from omni.isaac.lab.sensors import Camera, CameraCfg, TiledCamera, TiledCameraCfg, save_images_to_file
-import omni.replicator.core as rep
-from omni.isaac.lab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
-from omni.isaac.lab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
-from omni.isaac.lab.controllers import DifferentialIKController, DifferentialIKControllerCfg
-from omni.isaac.lab.markers import VisualizationMarkers
-from omni.isaac.lab.markers.config import FRAME_MARKER_CFG
-from omni.isaac.lab.managers import SceneEntityCfg
 from omni.isaac.lab.utils.math import subtract_frame_transforms
-from omni.isaac.core import PhysicsContext
-import math
-import quaternion
+from omni.physx import acquire_physx_interface
 import carb.settings
-import os
-from omni.isaac.lab.utils import convert_dict_to_backend
-import cv2
-from std_msgs.msg import String
-import matplotlib as plt
-from cv_bridge import CvBridge
-from sensor_msgs.msg import Image
-from omni.isaac.lab.sim import SimulationContext 
-from copy import deepcopy
-import time
-import gymnasium as gym
-from omni.isaac.lab.utils.math import sample_uniform
 
-import argparse
-from omegaconf import OmegaConf
+from .fluid_object import FluidObject, FluidObjectCfg
+from .suction.suction_controller import SuctionControllerNoTimer
 
-from .pourit_utils.predictor import LiquidPredictor
 
 @configclass
 class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
-    # env
-    episode_length_s = 10  # 100 timesteps
-    decimation = 15
-    action_space = 2
+    # 环境配置
+    episode_length_s = 10
+    decimation = 2
+    action_space = 3
     state_space = 0
-    num_channels = 1
+    observation_space = 18
 
-    # simulation
+    # 仿真配置
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 120,
-        render_interval=1,
-        disable_contact_processing=True,
+        render_interval=2,
+        disable_contact_processing=False,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
@@ -79,95 +51,60 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
             dynamic_friction=1.0,
             restitution=0.0,
         ),
-        physx = sim_utils.PhysxCfg(gpu_max_particle_contacts=2**22)
+        physx=sim_utils.PhysxCfg(
+            gpu_max_particle_contacts=2**22,
+        ),
     )
 
-    # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=3.0, replicate_physics=False)
+    # 场景配置
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(
+        num_envs=16,
+        env_spacing=3.0,
+        replicate_physics=False,
+    )
 
-    # path
     CURRENT_PATH = os.path.dirname(os.path.realpath(__file__))
 
-    # robot
-    robot = ArticulationCfg(
-        prim_path="/World/envs/env_.*/Robot",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Robots/FrankaEmika/panda_instanceable.usd",
-            activate_contact_sensors=False,
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=True,
+    spawn_pos_tissue = Gf.Vec3f(0.0, 0.30, 0.0)
+    spawn_pos_fluid = spawn_pos_tissue + Gf.Vec3f(0.0, 0.0, 0.10)
+    spawn_pos_glass2 = Gf.Vec3f(0.0, 0.70, 0.01)
+    glass2_particle_height = 0.03
+
+    tissue_setup = UsdFileCfg(
+        usd_path=f"{CURRENT_PATH}/usd_models/try_blood/whole_sence2_3.usd",
+        scale=(1.0, 1.0, 1.0),
+        rigid_props=RigidBodyPropertiesCfg(
+            disable_gravity=True,
+            kinematic_enabled=True,
+        ),
+    )
+
+    table_setup = UsdFileCfg(
+        usd_path=f"{CURRENT_PATH}/usd_models/table.usd",
+        scale=(1.0, 1.0, 1.0),
+        collision_props=sim_utils.CollisionPropertiesCfg(),
+    )
+    table_pos = Gf.Vec3f(0.0, 0.0, 0.457)
+    table_height_offset = 0.914
+
+    glass2 = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/Glass2",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=spawn_pos_glass2, rot=[1, 0, 0, 0]),
+        spawn=UsdFileCfg(
+            usd_path=f"{CURRENT_PATH}/usd_models/Tall_Glass_5.usd",
+            semantic_tags=[("class", "Glass2")],
+            scale=(0.01, 0.01, 0.01),
+            rigid_props=RigidBodyPropertiesCfg(
+                solver_position_iteration_count=16,
+                solver_velocity_iteration_count=1,
+                max_angular_velocity=1000.0,
+                max_linear_velocity=1000.0,
                 max_depenetration_velocity=5.0,
-            ),
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                enabled_self_collisions=False, solver_position_iteration_count=12, solver_velocity_iteration_count=1
+                disable_gravity=False,
             ),
         ),
-        init_state=ArticulationCfg.InitialStateCfg(
-            joint_pos={
-                "panda_joint1": -1.4460,
-                "panda_joint2": 0.2157,
-                "panda_joint3": 1.2273,
-                "panda_joint4": -2.4090,
-                "panda_joint5": 2.8540,
-                "panda_joint6": 2.2554,
-                "panda_joint7": 0.7622, 
-                "panda_finger_joint.*": 0.04,
-            },
-            pos=(0.0, 0.0, 0),
-            rot=(0.0, 0.0, 0.0, 0.0),
-        ),
-        actuators={
-            "panda_shoulder": ImplicitActuatorCfg(
-                joint_names_expr=["panda_joint[1-4]"],
-                effort_limit=870.0,
-                velocity_limit=2.175,
-                stiffness=800.0,
-                damping=80.0,
-            ),
-            "panda_forearm": ImplicitActuatorCfg(
-                joint_names_expr=["panda_joint[5-7]"],
-                effort_limit=120.0,
-                velocity_limit=2.61,
-                stiffness=800.0,
-                damping=80.0,
-            ),
-            "panda_hand": ImplicitActuatorCfg(
-                joint_names_expr=["panda_finger_joint.*"],
-                effort_limit=200.0,
-                velocity_limit=0.2,
-                stiffness=2e3,
-                damping=1e2,
-            ),
-        },
     )
 
-    # camera
-    camera_pos = (1.0, 0.1, 0.2)
-    camera_rot = (0, 0, 0,  0.1)
-    camera: TiledCameraCfg = TiledCameraCfg(
-        prim_path="/World/envs/env_.*/Camera",
-        offset=TiledCameraCfg.OffsetCfg(pos=camera_pos, rot=camera_rot, convention="world"),
-        data_types=['rgb'],
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 20.0)
-        ),
-        width=150,
-        height=150,
-    )
-    # observation_space = [camera.height, camera.width, num_channels] if not using PourIt
-    # NOTE PourIt always crops the image to 480x480. Channels first in pytorch network. Position is of the EE relative to the target container
-    observation_space = {"camera": [num_channels, camera.width, camera.height], "position": 4}
-
-
-    # Joint names to actuate along the arm
-    robot_arm_names = list()
-    for i in range(1,8):
-        robot_arm_names.append("panda_joint%d"%i)
-
-    # Joint names of the fingers
-    robot_finger_names = ["panda_finger_joint.*"]
-
-    # ground plane
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="plane",
@@ -181,650 +118,742 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    # Spawn position for both the glass, the container and the fluid
-    spawn_pos_glass = Gf.Vec3f(0.61, -0.1, 0.25)
-    spawn_pos_fluid = spawn_pos_glass + Gf.Vec3f(0.0,0,0.05)
-    spawn_pos_container = Gf.Vec3f(0.61, 0., 0.01)
-
-    # Set Glass as rigid object
-    glass = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/Glass",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=spawn_pos_glass, rot=[1, 0, 0, 0]),
-        spawn=UsdFileCfg(
-            usd_path=f"{CURRENT_PATH}/usd_models/Tall_Glass_5.usd",
-            semantic_tags=[("class","Glass")],
-            scale=(0.01, 0.01, 0.01),
-            rigid_props=RigidBodyPropertiesCfg(
-                solver_position_iteration_count=16,
-                solver_velocity_iteration_count=1,
-                max_angular_velocity=1000.0,
-                max_linear_velocity=1000.0,
-                max_depenetration_velocity=5.0,
-                disable_gravity=False,
-            ),
-        ),
-    )
-
-    # Set target container as rigid object
-    # Container data from original usd model
-    container_height = 0.12
-    container_radius = 0.08/2
-    container_base = 0.02
-
-    container = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/Container",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=spawn_pos_container, rot=[1, 0, 0, 0]),
-        spawn=UsdFileCfg(
-            usd_path=f"{CURRENT_PATH}/usd_models/Tall_Glass_5.usd",
-            semantic_tags=[("class","Container")],
-            scale=(0.01, 0.01, 0.01),
-            rigid_props=RigidBodyPropertiesCfg(
-                solver_position_iteration_count=16,
-                solver_velocity_iteration_count=1,
-                max_angular_velocity=1000.0,
-                max_linear_velocity=1000.0,
-                max_depenetration_velocity=5.0,
-                disable_gravity=False,
-            ),
-        ),
-    )
-
-    # Add liquid configuration parameters
-    # Direct spawn
     liquidCfg = FluidObjectCfg()
-    liquidCfg.numParticlesX = 8
-    liquidCfg.numParticlesY = 8
-    liquidCfg.numParticlesZ = 44
-    liquidCfg.density = 0.0
+    liquidCfg.numParticlesX = 10
+    liquidCfg.numParticlesY = 10
+    liquidCfg.numParticlesZ = 3
+    liquidCfg.density = 1060.0
     liquidCfg.particle_mass = 0.001
-    liquidCfg.particleSpacing = 0.005
-    liquidCfg.viscosity = 0.91
+    liquidCfg.particleSpacing = 0.004
+    liquidCfg.viscosity = 3.5
 
-    # Fill levels inside the source container
-    particles_init_pos_list = ["particle_init_pos_low", "particle_init_pos_mid", "particle_init_pos_high"]
+    # PSM机器人配置
+    psm_robot = ArticulationCfg(
+        prim_path="/World/envs/env_.*/PSM",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=f"{CURRENT_PATH}/usd_models/psm_all.usd",
+            activate_contact_sensors=True,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=False,
+                max_depenetration_velocity=5.0,
+            ),
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                enabled_self_collisions=False,
+                solver_position_iteration_count=4,
+                solver_velocity_iteration_count=0,
+            ),
+        ),
+        init_state=ArticulationCfg.InitialStateCfg(
+            joint_pos={
+                "psm_rev_joint": 0.0,
+                "psm_yaw_joint": 0.0,
+                "psm_pitch_back_joint": 0.0,
+                "psm_pitch_bottom_joint": 0.0,
+                "psm_pitch_end_joint": 0.0,
+                "psm_main_insertion_joint": 0.07,
+                "suction_tool_pitch_joint": 0.0,
+                "suction_tool_end_joint": 0.0,
+            },
+            pos=(0.0, -0.20, 0.0),
+        ),
+        actuators={
+            "psm": ImplicitActuatorCfg(
+                joint_names_expr=[
+                    "psm_rev_joint",
+                    "psm_yaw_joint",
+                    "psm_pitch_back_joint",
+                    "psm_pitch_bottom_joint",
+                    "psm_pitch_end_joint",
+                    "psm_main_insertion_joint",
+                    "suction_tool_pitch_joint",
+                    "suction_tool_end_joint",
+                ],
+                effort_limit=12000,
+                stiffness=800.0,
+                damping=40.0,
+            ),
+        },
+        soft_joint_pos_limit_factor=1.0,
+    )
 
-    # reward scales
-    inside_weight = 1.0
-    outside_weight = -1.0
-    source_pos_weight = 0.
-    source_ground_weight = -0
-    source_vel_weight = -0.00
-    joint_vel_weight = 0
-    actions_weight = -0.1
+    # Differential IK 动作配置
+    ik_joint_names = (
+        # "psm_rev_joint",
+        "psm_yaw_joint",
+        # "psm_pitch_back_joint",
+        # "psm_pitch_bottom_joint",
+        "psm_pitch_end_joint",
+        "psm_main_insertion_joint",
+    )
+    tool_joint_names = (
+        "suction_tool_pitch_joint",
+        "suction_tool_end_joint",
+    )
+    action_scale_lin = 0.003
+    workspace_low_offset = (-0.10, -0.10, -0.02)
+    workspace_high_offset = (0.10, 0.10, 0.30)
 
-    # Action scales
-    action_scale_lin = 0.01
-    action_scale_rot = 0.2
+    # 吸附参数
+    psm_tip_body_name = "suction_tool_end_link"
+    psm_tip_local_offset = (0.0, -0.011957148076033514, 0.0)
+    psm_tip_local_axis = (0.0, -1.0, 0.0)
+    tip_contact_force_threshold = 0.5
+    height_axis = 2
+    height_limit = 0.92
+    suction_cone_half_angle_deg = 60.0
+    suction_cone_range = 0.07
+    suction_force_scale = 0.02
+    suction_epsilon = 1e-6
+    inlet_radius = 0.008
+    inlet_depth = 0.012
+    use_body_quat_for_tip_dir = True
+    outflow_speed = 0.02
+    max_particle_speed = 0.4
 
+    # 奖励参数
+    reward_absorb_weight = 6.0
+    centroid_progress_weight = 100.0
+    centroid_progress_clip = 0.02
+    reward_cone_coverage_weight = 0.4
+    reward_inlet_coverage_weight = 0.8
+    reward_action_weight = 0.02
+    reward_time_penalty = 0.005
+    reward_task_complete = 10.0
+    reward_collision_force_weight = 0.03
+    absorbed_delta_ema_alpha = 0.2
+    severe_contact_force_threshold = 2.0
+    severe_contact_patience = 2
+
+    # 成功条件
+    success_absorption_ratio = 0.75
+    joint_limit_termination_tolerance = 1e-3
+
+    debug_print_ee_pos = False
+    debug_print_ee_pos_interval = 1
 
 
 class PsmBloodAbsorptionEnv(DirectRLEnv):
-    # pre-physics step calls
-    #   |-- _pre_physics_step(action)
-    #   |-- _apply_action()
-    # post-physics step calls
-    #   |-- _get_dones()
-    #   |-- _get_rewards()
-    #   |-- _reset_idx(env_ids)
-    #   |-- _get_observations()
+    """低维观测的 PSM 粒子吸取环境."""
 
     cfg: PsmBloodAbsorptionEnvCfg
 
     def __init__(self, cfg: PsmBloodAbsorptionEnvCfg, render_mode: str | None = None, **kwargs):
+        self._tip_contact_sensor = None
+        self._ee_jacobi_idx: int | None = None
         super().__init__(cfg, render_mode, **kwargs)
 
-        self.dt = self.cfg.sim.dt * self.cfg.decimation
-
-        # create auxiliary variables for computing applied action, observations and rewards
-        self.robot_dof_lower_limits = self._robot.data.soft_joint_pos_limits[0, :, 0].to(device=self.device)
-        self.robot_dof_upper_limits = self._robot.data.soft_joint_pos_limits[0, :, 1].to(device=self.device)
-
-        self.robot_dof_speed_scales = torch.ones_like(self.robot_dof_lower_limits)
-
-        self.robot_dof_targets = torch.zeros((self.num_envs, self._robot.num_joints-2), device=self.device)
-
-        self._robot_arm_idx, _ = self._robot.find_joints(self.cfg.robot_arm_names)
-        self._robot_finger_idx = self._robot.find_joints(self.cfg.robot_finger_names)
-
         self.stage = get_current_stage()
+        self._suction_controller = SuctionControllerNoTimer(cfg=cfg, num_envs=self.num_envs)
 
-        self.action_constraints_low = torch.tensor([-0.3, -math.pi], device=self.device)
-        self.action_constraints_high = torch.tensor([0.3, 0], device=self.device)
+        self._initial_particles_pos = None
+        self._initial_particles_vel = None
+        self._particles_initialized = False
 
+        self._step_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._absorbed_count = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self._absorbed_delta = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self._absorbed_delta_ema = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self._blood_centroid = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+        self._prev_blood_centroid = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+        self._blood_centroid_distance = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self._prev_blood_centroid_distance = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self._valid_in_cone_ratio = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self._valid_in_inlet_ratio = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self._task_state_dirty = True
+        self._task_state_apply_suction = False
+        self._severe_contact_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._terminated = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._episode_reward_sums = {
+            "absorb_reward": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
+            "centroid_progress_reward": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
+            "cone_coverage_reward": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
+            "inlet_coverage_reward": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
+            "action_penalty": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
+            "collision_force_penalty": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
+            "time_penalty": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
+            "task_complete": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
+        }
+        self._episode_success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._episode_joint_limit = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._episode_severe_collision = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._episode_time_out = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
-    def _setup_scene(self):       
-        
-        # Force GPU dynamics to simulate liquids
+        self._raw_actions = torch.zeros((self.num_envs, self.cfg.action_space), dtype=torch.float32, device=self.device)
+
+        self._expected_particle_count = float(
+            self.cfg.liquidCfg.numParticlesX * self.cfg.liquidCfg.numParticlesY * self.cfg.liquidCfg.numParticlesZ
+        )
+        self._success_threshold = self._expected_particle_count * float(self.cfg.success_absorption_ratio)
+
+        self._joint_lower_limits = self._psm.data.soft_joint_pos_limits[0, :, 0].to(device=self.device)
+        self._joint_upper_limits = self._psm.data.soft_joint_pos_limits[0, :, 1].to(device=self.device)
+
+        joint_names = list(self._psm.data.joint_names)
+        self._joint_name_to_idx = {name: idx for idx, name in enumerate(joint_names)}
+        self._ik_joint_ids = [self._joint_name_to_idx[name] for name in self.cfg.ik_joint_names]
+        self._tool_joint_ids = [self._joint_name_to_idx[name] for name in self.cfg.tool_joint_names]
+        self._ik_joint_lower_limits = self._joint_lower_limits[self._ik_joint_ids]
+        self._ik_joint_upper_limits = self._joint_upper_limits[self._ik_joint_ids]
+        self._tool_joint_default_pos = self._psm.data.default_joint_pos[0, self._tool_joint_ids].clone()
+        self._joint_pos_des = self._psm.data.default_joint_pos[:, self._ik_joint_ids].clone()
+
+        self._psm_body_name_to_idx, self._psm_body_name_to_path = self._build_psm_body_lookup()
+        self._register_tip_contact_sensor()
+        self._tip_body_idx = self._resolve_required_body_idx(self.cfg.psm_tip_body_name)
+        self._tip_local_offset = torch.tensor(self.cfg.psm_tip_local_offset, dtype=torch.float32, device=self.device)
+        self._tip_local_axis = torch.tensor(self.cfg.psm_tip_local_axis, dtype=torch.float32, device=self.device)
+        self._tip_local_axis = self._tip_local_axis / torch.linalg.vector_norm(self._tip_local_axis).clamp_min(1.0e-9)
+
+        self._ik_controller_cfg = DifferentialIKControllerCfg(
+            command_type="position",
+            use_relative_mode=False,
+            ik_method="dls",
+        )
+        self._ik_controller = DifferentialIKController(self._ik_controller_cfg, num_envs=self.num_envs, device=self.device)
+        self._psm_entity_cfg = SceneEntityCfg("psm", joint_names=list(self.cfg.ik_joint_names), body_names=[self.cfg.psm_tip_body_name])
+        self._ik_commands = torch.zeros((self.num_envs, self._ik_controller.action_dim), dtype=torch.float32, device=self.device)
+        self._ee_goal_pos_w = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+
+        self._workspace_local_low = self._build_workspace_local_low()
+        self._workspace_local_high = self._build_workspace_local_high()
+        self._workspace_low_w = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+        self._workspace_high_w = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+        self._update_workspace_bounds()
+
+        self._obs_state = torch.zeros(
+            (self.num_envs, int(self.cfg.observation_space)),
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+    @staticmethod
+    def _gf_vec3_to_tensor(vec: Gf.Vec3f, device: torch.device | str) -> torch.Tensor:
+        return torch.tensor((float(vec[0]), float(vec[1]), float(vec[2])), dtype=torch.float32, device=device)
+
+    def _build_workspace_local_low(self) -> torch.Tensor:
+        lift = torch.tensor((0.0, 0.0, float(self.cfg.table_height_offset)), dtype=torch.float32, device=self.device)
+        spawn_pos_tissue = self._gf_vec3_to_tensor(self.cfg.spawn_pos_tissue, self.device)
+        workspace_low_offset = torch.tensor(self.cfg.workspace_low_offset, dtype=torch.float32, device=self.device)
+        return spawn_pos_tissue + lift + workspace_low_offset
+
+    def _build_workspace_local_high(self) -> torch.Tensor:
+        lift = torch.tensor((0.0, 0.0, float(self.cfg.table_height_offset)), dtype=torch.float32, device=self.device)
+        spawn_pos_tissue = self._gf_vec3_to_tensor(self.cfg.spawn_pos_tissue, self.device)
+        workspace_high_offset = torch.tensor(self.cfg.workspace_high_offset, dtype=torch.float32, device=self.device)
+        return spawn_pos_tissue + lift + workspace_high_offset
+
+    def _update_workspace_bounds(self) -> None:
+        self._workspace_low_w[:] = self.scene.env_origins + self._workspace_local_low.unsqueeze(0)
+        self._workspace_high_w[:] = self.scene.env_origins + self._workspace_local_high.unsqueeze(0)
+
+    def _resolve_ik_handles(self) -> None:
+        self._psm_entity_cfg.resolve(self.scene)
+        self._ee_jacobi_idx = self._psm_entity_cfg.body_ids[0] - 1
+
+    def _setup_scene(self):
         physx_interface = acquire_physx_interface()
         physx_interface.overwrite_gpu_setting(1)
 
-        # Set partial rendering
-        Sim_Context = SimulationContext()
-        rendermode = Sim_Context.RenderMode.FULL_RENDERING
-        Sim_Context.set_render_mode(mode=rendermode)
-
-        # Set translucency to render transparent materials
+        sim_context = SimulationContext()
+        sim_context.set_render_mode(sim_context.RenderMode.FULL_RENDERING)
         settings = carb.settings.get_settings()
+        settings.set_bool("/physics/disableContactProcessing", False)
         settings.set("/rtx/translucency/enabled", True)
 
-        # Liquid, spawns it and gets the initial positions and velocities
-        self.liquid = FluidObject(cfg=self.cfg.liquidCfg, 
-                             lower_pos = self.cfg.spawn_pos_fluid)
+        self.cfg.table_setup.func(
+            prim_path="/World/envs/env_0/Table",
+            cfg=self.cfg.table_setup,
+            translation=self.cfg.table_pos,
+        )
+
+        lift = Gf.Vec3f(0.0, 0.0, self.cfg.table_height_offset)
+        spawn_pos_tissue = self.cfg.spawn_pos_tissue + lift
+        spawn_pos_fluid = self.cfg.spawn_pos_fluid + lift
+        spawn_pos_glass2 = self.cfg.spawn_pos_glass2
+
+        self.liquid = FluidObject(cfg=self.cfg.liquidCfg, lower_pos=spawn_pos_fluid)
         self.liquid.spawn_fluid_direct()
 
-        # # Initial particle position, from spawn or from saved file
-        # self.liquid_init_pos, self.liquid_init_vel = torch.tensor(self.liquid.get_particles_position(0) , device = self.device)
-        self.liquid_init_pos = list()
-        self.liquid_init_vel = list()
+        self.cfg.tissue_setup.func(
+            prim_path="/World/envs/env_0/TissueSetup",
+            cfg=self.cfg.tissue_setup,
+            translation=spawn_pos_tissue,
+        )
 
-        for i in range(len(self.cfg.particles_init_pos_list)):
-            self.liquid_init_pos.append(torch.load(f"{self.cfg.CURRENT_PATH}/usd_models/{self.cfg.particles_init_pos_list[i]}.pt").cpu().numpy())
-            self.liquid_init_pos[i] += np.ones_like(self.liquid_init_pos[i])*np.array([0, 0, 0.01])
-            self.liquid_init_vel.append(np.zeros_like(self.liquid_init_pos[i]))
-        
-        # Reward and observations
-        self.reward = np.zeros((self.num_envs))
-        self.obs_reward_in = np.zeros((self.num_envs))
-        self.obs_reward_out = np.zeros((self.num_envs))
-        self.particle_fraction_in = np.zeros((self.num_envs,1))
-        self.particle_fraction_out = np.zeros((self.num_envs,1))
-        
-        # Glass, position it before the robot
-        self._glass = RigidObject(self.cfg.glass)
-        self.scene.rigid_objects["glass"] = self._glass
+        self.cfg.glass2.init_state.pos = spawn_pos_glass2
+        self._glass2 = RigidObject(self.cfg.glass2)
+        self.scene.rigid_objects["glass2"] = self._glass2
 
-        # Container
-        self._container = RigidObject(self.cfg.container)
-        self.scene.rigid_objects["container"] = self._container
-
-        # Robot
-        self._robot = Articulation(self.cfg.robot)
-        self.scene.articulations["robot"] = self._robot
+        psm_pos = list(self.cfg.psm_robot.init_state.pos)
+        psm_pos[2] += self.cfg.table_height_offset
+        self.cfg.psm_robot.init_state.pos = tuple(psm_pos)
+        self._psm = Articulation(self.cfg.psm_robot)
+        self.scene.articulations["psm"] = self._psm
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
-        self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)     
+        self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
 
-        # Camera
-        self._camera = TiledCamera(self.cfg.camera) 
-        self.data_type = 'rgb'
-        self.scene.sensors["camera"] = self._camera 
-
-        # clone, filter, and replicate
         self.scene.clone_environments(copy_from_source=False)
         self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
 
-        # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-        # End effector controller
-        self.diff_ik_cfg = DifferentialIKControllerCfg(command_type="pose", use_relative_mode=False, ik_method="dls")
-        self.diff_ik_controller = DifferentialIKController(self.diff_ik_cfg, num_envs=self.scene.num_envs, device=self.device)
-        self.robot_entity_cfg = SceneEntityCfg("robot", joint_names=self.cfg.robot_arm_names, body_names=["panda_hand"])
-        self.ik_commands = torch.zeros(self.scene.num_envs, 7, device=self.device)
-
-        # Setup for the end effector control
-        self.start_ee_pos = torch.tensor([0.5, -0.1, 0.3, 0.707, 0, 0.707, 0], device=self.device) 
-        self.actions_raw = torch.zeros((self.num_envs,self.cfg.action_space), device=self.device)
-        self.actions_new = torch.ones((self.num_envs,7), device=self.device)*self.start_ee_pos # Starting EE position
-        self.actions_total = torch.zeros((self.num_envs,self.cfg.action_space), device=self.device)
-        self.deltas = torch.zeros((self.num_envs, 3), device = self.device)
-        self.betas = torch.zeros((self.num_envs,3), device = self.device) 
-        self.quat = torch.zeros((self.num_envs, 4), device = self.device)
-
-        self.betas[:,0] = 1.0 # The rotation axis is fixed
-
-         # Marker on the end effector and the desired pose
-        frame_marker_cfg = FRAME_MARKER_CFG.copy()
-        frame_marker_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
-        self.ee_marker = VisualizationMarkers(frame_marker_cfg.replace(prim_path="/Visuals/ee_current"))
-        self.goal_marker = VisualizationMarkers(frame_marker_cfg.replace(prim_path="/Visuals/ee_goal"))
-        self._robot.set_external_force_and_torque(forces=torch.zeros(0, 3), torques=torch.zeros(0, 3)) # NOTE: It deactivates forces at end effector to obtain correct kinematics
-
-        # Target on the finger actuators to hold the glass
-        self.ee_target = torch.zeros((self.num_envs, 2), device = self.device)  
-
-        # Create replicator writer
-        self.output_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "output", "camera")
-        self.rep_writer = rep.BasicWriter(
-            output_dir=self.output_dir,
-            frame_padding=0,
-            colorize_instance_id_segmentation=self._camera.cfg.colorize_instance_id_segmentation,
-            colorize_instance_segmentation=self._camera.cfg.colorize_instance_segmentation,
-            colorize_semantic_segmentation=self._camera.cfg.colorize_semantic_segmentation,
-        )
-        # PourIt model
-        # PourIt configuration
-        self.args = argparse.Namespace
-        self.args.config = f"{self.cfg.CURRENT_PATH}/pourit_utils/configs/pourit_seen_ours.yaml"
-        self.args.pooling = "gmp"
-        self.args.work_dir = None
-        self.args.crop_size = 480
-        self.args.model_path = f"{self.cfg.CURRENT_PATH}/pourit_utils/checkpoints/iter_014000.pth"
-        self.predictor_cfg = OmegaConf.load(self.args.config)
-        self.predictor_cfg.dataset.crop_size = self.args.crop_size
-        if self.args.work_dir is not None:
-            self.predictor_cfg.work_dir.dir = self.args.work_dir
-        self.predictor = LiquidPredictor(self.predictor_cfg, self.args)
-        self.obs = {"camera": torch.zeros((self.num_envs, self.cfg.num_channels, self.cfg.camera.width, self.cfg.camera.height), device = self.device), "position": torch.zeros((self.num_envs, 6), device = self.device)}
-
-
-    # pre-physics step calls
-
     def _pre_physics_step(self, actions: torch.Tensor):
+        if self._ee_jacobi_idx is None:
+            self._resolve_ik_handles()
 
-        # Actions are defined as deltas to apply to the current EE position. Rotations with quaternions, first extracted as axis and angle
-        self.actions_raw = actions.clone()
-        self.deltas = self.actions_raw[:,0]*self.cfg.action_scale_lin
-        self.alphas = self.actions_raw[:,1]*self.cfg.action_scale_rot # Rotation angle
-        # self.alphas = self.actions_raw.squeeze(1)*self.cfg.action_scale_rot # Rotation angle
+        self._raw_actions[:] = torch.clamp(actions, -1.0, 1.0)
+        delta_pos = self._raw_actions * float(self.cfg.action_scale_lin)
 
-        # # Imposed motions (UNCOMMENT TO POUR ON FIXED TRAJECTORY)
-        # self.deltas = torch.zeros_like(self.deltas)
-        # self.alphas = torch.zeros_like(self.alphas)
+        tip_pos_w, _ = self._compute_tip_pose_and_direction_w()
+        tip_quat_w = self._compute_tip_quat_w()
+        uninitialized_goal = torch.linalg.vector_norm(self._ee_goal_pos_w, dim=-1) < 1.0e-6
+        self._ee_goal_pos_w[uninitialized_goal] = tip_pos_w[uninitialized_goal]
+        self._ee_goal_pos_w += delta_pos
+        self._ee_goal_pos_w = torch.clamp(self._ee_goal_pos_w, self._workspace_low_w, self._workspace_high_w)
 
-        # if (self.counter >= 100) & (self.counter < 120):
-        #     self.deltas = torch.ones_like(self.deltas)*torch.tensor([0, 0.03,-0.]) /2   
-
-        # if self.counter == 200:
-        #     self.alphas = torch.ones_like(self.alphas)*(-math.pi/2)
-        
-        # # SAVE PARTICLES (Uncomment to save particles in order to obtain a cleaner initial position)
-        # if self.counter == 200:
-        #     particle_pos, vel = self.liquid.get_particles_position(0)
-        #     torch.save(torch.tensor(particle_pos),f"{self.cfg.CURRENT_PATH}/usd_models/particle_init_pos_high.pt")
-
-        self.counter += 1
-        
-        # Build the quaternion
-        # Calculate half the angle
-        half_angle = self.alphas / 2.0
-        
-        # Compute the quaternion components
-        self.quat[:,0] = torch.cos(half_angle)
-        self.quat[:,1] = self.betas[:,0] * torch.sin(half_angle)
-        self.quat[:,2] = self.betas[:,1] * torch.sin(half_angle)
-        self.quat[:,3] = self.betas[:,2] * torch.sin(half_angle)
-        
-
-        #  Apply action at the end effector 
-        self.actions_new[:,1] += self.deltas
-        self.actions_new[:,3:7] = self.multiply_quaternions(self.quat[:],self.actions_new[:,3:7])
-
-        self.ik_commands[:] = self.actions_new
-        self.diff_ik_controller.set_command(self.ik_commands)
-
-        # Calculate joint movements to achieve the previous end effector position
-        jacobian = self._robot.root_physx_view.get_jacobians()[:, self.ee_jacobi_idx, :, self.robot_entity_cfg.joint_ids]
-        ee_pose_w = self._robot.data.body_state_w[:, self.robot_entity_cfg.body_ids[0], 0:7]
-        root_pose_w = self._robot.data.root_state_w[:, 0:7]
-        joint_pos = self._robot.data.joint_pos[:, self.robot_entity_cfg.joint_ids]
+        root_pose_w = self._psm.data.root_state_w[:, 0:7]
         ee_pos_b, ee_quat_b = subtract_frame_transforms(
-            root_pose_w[:, 0:3], root_pose_w[:, 3:7], ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
+            root_pose_w[:, 0:3], root_pose_w[:, 3:7], tip_pos_w, tip_quat_w
+        )
+        ee_goal_pos_b, _ = subtract_frame_transforms(
+            root_pose_w[:, 0:3], root_pose_w[:, 3:7], self._ee_goal_pos_w, tip_quat_w
         )
 
-        joint_pos_des = self.diff_ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
-        
-        # Markers
-        # self.ee_marker.visualize(ee_pose_w[:, 0:3], ee_pose_w[:, 3:7])
-        self.goal_marker.visualize(self.ik_commands[:, 0:3] + self.scene.env_origins, self.ik_commands[:, 3:7])
+        self._ik_commands[:] = ee_goal_pos_b
+        self._ik_controller.set_command(self._ik_commands, ee_quat=ee_quat_b)
 
-        # Joint positions to give to the robot as command
-        self.joint_pos_des = torch.clamp(joint_pos_des, self.robot_dof_lower_limits[:7], self.robot_dof_upper_limits[:7])
+        jacobian = self._psm.root_physx_view.get_jacobians()[:, self._ee_jacobi_idx, :, self._ik_joint_ids]
+        joint_pos = self._psm.data.joint_pos[:, self._ik_joint_ids]
+        self._joint_pos_des[:] = self._ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
+        self._joint_pos_des[:] = torch.clamp(self._joint_pos_des, self._ik_joint_lower_limits, self._ik_joint_upper_limits)
 
+        self._task_state_dirty = True
+        self._task_state_apply_suction = True
 
     def _apply_action(self):
-        self._robot.set_joint_position_target(self.joint_pos_des, joint_ids=self._robot_arm_idx)
-        self._robot.set_joint_position_target(self.ee_target, joint_ids=self._robot_finger_idx[0])
-        
-    # post-physics step calls
+        tool_targets = self._tool_joint_default_pos.unsqueeze(0).expand(self.num_envs, -1)
+        self._psm.set_joint_position_target(self._joint_pos_des, joint_ids=self._ik_joint_ids)
+        self._psm.set_joint_position_target(tool_targets, joint_ids=self._tool_joint_ids)
+
+    def _register_tip_contact_sensor(self) -> None:
+        tip_body_path = self._psm_body_name_to_path.get(self.cfg.psm_tip_body_name)
+
+        tip_contact_cfg = ContactSensorCfg(
+            prim_path=tip_body_path,
+            update_period=0.0,
+            history_length=1,
+            track_air_time=True,
+            force_threshold=float(self.cfg.tip_contact_force_threshold),
+            debug_vis=False,
+        )
+        self._tip_contact_sensor = ContactSensor(cfg=tip_contact_cfg)
+        self.scene.sensors["tip_contact"] = self._tip_contact_sensor
+        if self.sim.is_playing():
+            self._tip_contact_sensor._initialize_callback(None)
+
+    def _get_tip_contact_force(self) -> torch.Tensor:
+        if self._tip_contact_sensor is None:
+            return torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+
+        net_forces_w = self.scene["tip_contact"].data.net_forces_w
+        contact_force = torch.linalg.vector_norm(net_forces_w, dim=-1)
+        if contact_force.ndim > 1:
+            contact_force = torch.amax(contact_force, dim=1)
+        return contact_force.to(dtype=torch.float32)
+
+    def _build_psm_body_lookup(self) -> tuple[dict[str, int], dict[str, str]]:
+        env_zero_ns = self.scene.env_regex_ns.replace(".*", "0")
+        body_name_to_idx: dict[str, int] = {}
+        body_name_to_path: dict[str, str] = {}
+
+        for body_idx, (body_name, body_path) in enumerate(zip(self._psm.body_names, self._psm.root_physx_view.link_paths[0])):
+            body_name_to_idx[body_name] = body_idx
+            if body_path.startswith(env_zero_ns):
+                body_name_to_path[body_name] = body_path.replace(env_zero_ns, self.scene.env_regex_ns, 1)
+            else:
+                body_name_to_path[body_name] = body_path
+
+        return body_name_to_idx, body_name_to_path
+
+    def _resolve_required_body_idx(self, body_name: str) -> int:
+        if body_name not in self._psm_body_name_to_idx:
+            available = ", ".join(self._psm.body_names)
+            raise RuntimeError(f"Required PSM body '{body_name}' not found. Available bodies: {available}")
+        return self._psm_body_name_to_idx[body_name]
+
+    @staticmethod
+    def _quat_rotate_torch(quat_wxyz: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+        quat_vec = quat_wxyz[..., 1:]
+        uv = torch.linalg.cross(quat_vec, vec, dim=-1)
+        uuv = torch.linalg.cross(quat_vec, uv, dim=-1)
+        return vec + 2.0 * (quat_wxyz[..., :1] * uv + uuv)
+
+    def _compute_tip_quat_w(self) -> torch.Tensor:
+        body_quat_w = getattr(self._psm.data, "body_quat_w", None)
+        if body_quat_w is None:
+            return self._psm.data.root_state_w[:, 3:7]
+        return body_quat_w[:, self._tip_body_idx]
+
+    def _compute_tip_pose_and_direction_w(self) -> tuple[torch.Tensor, torch.Tensor]:
+        tip_body_pos_w = self._psm.data.body_pos_w[:, self._tip_body_idx]
+        local_offset = self._tip_local_offset.unsqueeze(0).expand(self.num_envs, -1)
+        local_axis = self._tip_local_axis.unsqueeze(0).expand(self.num_envs, -1)
+
+        body_quat_w = getattr(self._psm.data, "body_quat_w", None)
+        if body_quat_w is None:
+            tip_pos_w = tip_body_pos_w + local_offset
+            tip_dir_w = local_axis
+        else:
+            tip_body_quat_w = body_quat_w[:, self._tip_body_idx]
+            tip_pos_w = tip_body_pos_w + self._quat_rotate_torch(tip_body_quat_w, local_offset)
+            if self.cfg.use_body_quat_for_tip_dir:
+                tip_dir_w = self._quat_rotate_torch(tip_body_quat_w, local_axis)
+            else:
+                tip_dir_w = local_axis
+
+        tip_dir_w = tip_dir_w / torch.linalg.vector_norm(tip_dir_w, dim=-1, keepdim=True).clamp_min(1.0e-9)
+        return tip_pos_w, tip_dir_w
+
+    def _refresh_post_step_task_state(self) -> None:
+        if not self._task_state_dirty:
+            return
+
+        tip_pos_w, tip_dir_w = self._compute_tip_pose_and_direction_w()
+
+        if self._task_state_apply_suction:
+            suction_stats = self._suction_controller.step(
+                step_count=self._step_count.detach().cpu().numpy(),
+                num_envs=self.num_envs,
+                psm=self._psm,
+                liquid=self.liquid,
+                glass2=self._glass2,
+                env_origins=self.scene.env_origins,
+            )
+            self._absorbed_delta[:] = torch.from_numpy(suction_stats["absorbed_delta"]).to(self.device)
+            self._absorbed_count += self._absorbed_delta
+            alpha = float(self.cfg.absorbed_delta_ema_alpha)
+            self._absorbed_delta_ema.mul_(1.0 - alpha).add_(alpha * self._absorbed_delta)
+
+        self._update_particle_task_state(tip_pos_w=tip_pos_w, tip_dir_w=tip_dir_w)
+        self._task_state_apply_suction = False
+        self._task_state_dirty = False
+
+    def _update_particle_task_state(self, tip_pos_w: torch.Tensor, tip_dir_w: torch.Tensor) -> None:
+        tip_pos_local = tip_pos_w - self.scene.env_origins
+        prev_centroid = self._blood_centroid.clone()
+        prev_distance = self._blood_centroid_distance.clone()
+        self._prev_blood_centroid.copy_(prev_centroid)
+        self._prev_blood_centroid_distance.copy_(prev_distance)
+
+        suction_radius = float(self.cfg.suction_cone_range)
+        inlet_depth = float(self.cfg.inlet_depth)
+        inlet_radius = float(self.cfg.inlet_radius)
+        cos_theta = float(np.cos(np.deg2rad(float(self.cfg.suction_cone_half_angle_deg))))
+        epsilon = max(float(getattr(self.cfg, "suction_epsilon", 1.0e-6)), 1.0e-12)
+
+        for env_idx in range(self.num_envs):
+            particles_pos, _ = self.liquid.get_particles_position(env_idx)
+            if len(particles_pos) == 0:
+                if int(self._step_count[env_idx].item()) <= 0:
+                    self._blood_centroid[env_idx] = tip_pos_w[env_idx]
+                    self._prev_blood_centroid[env_idx] = tip_pos_w[env_idx]
+                    self._blood_centroid_distance[env_idx] = 0.0
+                    self._prev_blood_centroid_distance[env_idx] = 0.0
+                else:
+                    self._blood_centroid[env_idx] = prev_centroid[env_idx]
+                    self._blood_centroid_distance[env_idx] = prev_distance[env_idx]
+                self._valid_in_cone_ratio[env_idx] = 0.0
+                self._valid_in_inlet_ratio[env_idx] = 0.0
+                continue
+
+            particles_pos_tensor = torch.as_tensor(particles_pos, dtype=torch.float32, device=self.device)
+            valid_mask = particles_pos_tensor[:, self.cfg.height_axis] >= float(self.cfg.height_limit)
+            if not torch.any(valid_mask):
+                if int(self._step_count[env_idx].item()) <= 0:
+                    self._blood_centroid[env_idx] = tip_pos_w[env_idx]
+                    self._prev_blood_centroid[env_idx] = tip_pos_w[env_idx]
+                    self._blood_centroid_distance[env_idx] = 0.0
+                    self._prev_blood_centroid_distance[env_idx] = 0.0
+                else:
+                    self._blood_centroid[env_idx] = prev_centroid[env_idx]
+                    self._blood_centroid_distance[env_idx] = prev_distance[env_idx]
+                self._valid_in_cone_ratio[env_idx] = 0.0
+                self._valid_in_inlet_ratio[env_idx] = 0.0
+                continue
+
+            valid_positions = particles_pos_tensor[valid_mask]
+            centroid_local = valid_positions.mean(dim=0)
+            centroid_w = centroid_local + self.scene.env_origins[env_idx]
+            relative_positions = valid_positions - tip_pos_local[env_idx]
+            distances = torch.linalg.vector_norm(relative_positions, dim=1)
+            axial_depth = torch.sum(relative_positions * tip_dir_w[env_idx], dim=1)
+            radial_offset = relative_positions - axial_depth.unsqueeze(1) * tip_dir_w[env_idx]
+            radial_distance = torch.linalg.vector_norm(radial_offset, dim=1)
+            cos_alpha = axial_depth / distances.clamp_min(epsilon)
+            in_cone = (distances < suction_radius) & (cos_alpha >= cos_theta)
+            in_inlet = (axial_depth > 0.0) & (axial_depth < inlet_depth) & (radial_distance < inlet_radius)
+            valid_count = max(valid_positions.shape[0], 1)
+            current_distance = torch.linalg.vector_norm(centroid_local - tip_pos_local[env_idx])
+
+            self._blood_centroid[env_idx] = centroid_w
+            self._blood_centroid_distance[env_idx] = current_distance
+            self._valid_in_cone_ratio[env_idx] = in_cone.to(dtype=torch.float32).sum() / float(valid_count)
+            self._valid_in_inlet_ratio[env_idx] = in_inlet.to(dtype=torch.float32).sum() / float(valid_count)
+
+            if int(self._step_count[env_idx].item()) <= 0:
+                self._prev_blood_centroid[env_idx] = centroid_w
+                self._prev_blood_centroid_distance[env_idx] = current_distance
+
+    def _normalize_workspace_positions(self, pos_w: torch.Tensor) -> torch.Tensor:
+        workspace_range = (self._workspace_high_w - self._workspace_low_w).clamp_min(1.0e-6)
+        normalized = 2.0 * (pos_w - self._workspace_low_w) / workspace_range - 1.0
+        return torch.clamp(normalized, -1.0, 1.0)
+
+    def _maybe_print_tip_position(self, tip_pos_w: torch.Tensor) -> None:
+        if not bool(getattr(self.cfg, "debug_print_ee_pos", False)) or self.num_envs <= 0:
+            return
+
+        interval = max(int(getattr(self.cfg, "debug_print_ee_pos_interval", 50)), 1)
+        step = int(self._step_count[0].item())
+        if step % interval != 0:
+            return
+
+        tip_pos = tip_pos_w[0].detach().cpu().tolist()
+        print(f"[EE] env=0 step={step} tip_pos_w=({tip_pos[0]:.4f}, {tip_pos[1]:.4f}, {tip_pos[2]:.4f})")
+
+    def _update_low_dim_observation(self) -> None:
+        self._refresh_post_step_task_state()
+
+        tip_pos_w, tip_dir_w = self._compute_tip_pose_and_direction_w()
+        reset_goal_mask = self._step_count <= 0
+        self._ee_goal_pos_w[reset_goal_mask] = tip_pos_w[reset_goal_mask]
+        self._maybe_print_tip_position(tip_pos_w)
+        tip_pos_normalized = self._normalize_workspace_positions(tip_pos_w)
+        workspace_range = (self._workspace_high_w - self._workspace_low_w).clamp_min(1.0e-6)
+        goal_error_normalized = torch.clamp(2.0 * (self._ee_goal_pos_w - tip_pos_w) / workspace_range, -1.0, 1.0)
+        blood_centroid_rel_normalized = torch.clamp((self._blood_centroid - tip_pos_w) / workspace_range, -1.0, 1.0)
+
+        absorbed_ratio = torch.clamp(self._absorbed_count / self._expected_particle_count, min=0.0, max=1.0).unsqueeze(1)
+        absorbed_delta_ema = torch.clamp(self._absorbed_delta_ema, min=0.0, max=1.0).unsqueeze(1)
+        valid_in_cone_ratio = torch.clamp(self._valid_in_cone_ratio, min=0.0, max=1.0).unsqueeze(1)
+        valid_in_inlet_ratio = torch.clamp(self._valid_in_inlet_ratio, min=0.0, max=1.0).unsqueeze(1)
+        contact_ratio = torch.clamp(
+            self._get_tip_contact_force() / max(float(self.cfg.tip_contact_force_threshold), 1.0e-6),
+            min=0.0,
+            max=1.0,
+        ).unsqueeze(1)
+        step_ratio = torch.clamp(
+            self._step_count.to(dtype=torch.float32) / max(float(self.max_episode_length), 1.0),
+            min=0.0,
+            max=1.0,
+        ).unsqueeze(1)
+
+        self._obs_state[:] = torch.cat(
+            (
+                tip_pos_normalized,
+                goal_error_normalized,
+                tip_dir_w,
+                blood_centroid_rel_normalized,
+                valid_in_cone_ratio,
+                valid_in_inlet_ratio,
+                absorbed_ratio,
+                absorbed_delta_ema,
+                contact_ratio,
+                step_ratio,
+            ),
+            dim=1,
+        )
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        self.terminated = torch.tensor(self.obs_reward_out, device=self.device) > 0.5 # Reset if most liquid poured outside
-        self.truncated = self.episode_length_buf >= self.max_episode_length - 1
-        return self.terminated, self.truncated
+        self._refresh_post_step_task_state()
+
+        ik_joint_pos = self._psm.data.joint_pos[:, self._ik_joint_ids]
+        tolerance = float(self.cfg.joint_limit_termination_tolerance)
+        joint_limit_reached = torch.any(
+            (ik_joint_pos <= self._ik_joint_lower_limits + tolerance)
+            | (ik_joint_pos >= self._ik_joint_upper_limits - tolerance),
+            dim=1,
+        )
+
+        contact_force = self._get_tip_contact_force()
+        severe_contact = contact_force > float(self.cfg.severe_contact_force_threshold)
+        self._severe_contact_counter[:] = torch.where(
+            severe_contact,
+            self._severe_contact_counter + 1,
+            torch.zeros_like(self._severe_contact_counter),
+        )
+        severe_collision = self._severe_contact_counter >= int(self.cfg.severe_contact_patience)
+        success = self._absorbed_count >= self._success_threshold
+
+        terminated = success | joint_limit_reached | severe_collision
+        truncated = self.episode_length_buf >= self.max_episode_length - 1
+
+        self._terminated[:] = terminated
+        self._episode_success[:] = success
+        self._episode_joint_limit[:] = joint_limit_reached
+        self._episode_severe_collision[:] = severe_collision
+        self._episode_time_out[:] = truncated
+        return terminated, truncated
 
     def _get_rewards(self) -> torch.Tensor:
-        # Target and source position
-        target_pos = self._container.data.root_pos_w - self.scene.env_origins
-        source_pos = self._glass.data.root_pos_w - self.scene.env_origins
-        source_vel = self._glass.data.root_lin_vel_w
-        joint_vel = self._robot.data.joint_vel[:,:7]
-        joint_acc = self._robot.data.joint_acc[:,:7] 
+        self._refresh_post_step_task_state()
 
-        # Compute reward for each environment
-        for i in range (self.num_envs):
-            pos, vel = self.liquid.get_particles_position(i)
-            # Computes fractions
-            self.particle_fraction_in[i,0], self.particle_fraction_out[i,0] =self.particle_fractions_func(
-                target = target_pos[i].cpu().numpy(),
-                particles = pos,
-                limit_height = self.cfg.container_height,
-                radius = self.cfg.container_radius,
-            )
-            
-        particle_fraction_in = torch.tensor(self.particle_fraction_in, device = self.device)
-        particle_fraction_out = torch.tensor(self.particle_fraction_out, device = self.device)
+        absorb_reward = self.cfg.reward_absorb_weight * self._absorbed_delta
+        centroid_progress = torch.clamp(
+            self._prev_blood_centroid_distance - self._blood_centroid_distance,
+            min=-float(self.cfg.centroid_progress_clip),
+            max=float(self.cfg.centroid_progress_clip),
+        )
+        centroid_progress_reward = self.cfg.centroid_progress_weight * centroid_progress
+        cone_coverage_reward = self.cfg.reward_cone_coverage_weight * self._valid_in_cone_ratio
+        inlet_coverage_reward = self.cfg.reward_inlet_coverage_weight * self._valid_in_inlet_ratio
+        action_penalty = self.cfg.reward_action_weight * torch.sum(self._raw_actions**2, dim=1)
+        contact_force = self._get_tip_contact_force()
+        collision_force_penalty = self.cfg.reward_collision_force_weight * torch.clamp(
+            contact_force - float(self.cfg.tip_contact_force_threshold), min=0.0
+        )
+        time_penalty = torch.full(
+            (self.num_envs,),
+            float(self.cfg.reward_time_penalty),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        task_complete = self.cfg.reward_task_complete * (self._absorbed_count >= self._success_threshold).float()
 
-        self.reward = self.compute_reward(particles_inside = particle_fraction_in, 
-                       particles_outside = particle_fraction_out,
-                       source_pos = source_pos,
-                       target_pos = target_pos,
-                       source_vel = source_vel,
-                       joint_vel = joint_vel,
-                       actions=self.actions_raw,
-                       limit_height=self.cfg.container_height,
-                       inside_weight = self.cfg.inside_weight, 
-                       outside_weight = self.cfg.outside_weight,
-                       source_pos_weight = self.cfg.source_pos_weight,
-                       source_ground_weight=self.cfg.source_ground_weight,
-                       source_vel_weight = self.cfg.source_vel_weight,
-                       joint_vel_weight = self.cfg.joint_vel_weight,
-                       actions_weight=self.cfg.actions_weight)
-        
-        reward = torch.tensor(self.reward, device=self.device).squeeze(1)
-        # print("Reward: "+str(reward[0]))
-        # print("***")
-        return reward.clone()
+        reward = (
+            task_complete
+            + absorb_reward
+            + centroid_progress_reward
+            + cone_coverage_reward
+            + inlet_coverage_reward
+            - action_penalty
+            - collision_force_penalty
+            - time_penalty
+        ).float()
+
+        self._episode_reward_sums["absorb_reward"] += absorb_reward
+        self._episode_reward_sums["centroid_progress_reward"] += centroid_progress_reward
+        self._episode_reward_sums["cone_coverage_reward"] += cone_coverage_reward
+        self._episode_reward_sums["inlet_coverage_reward"] += inlet_coverage_reward
+        self._episode_reward_sums["action_penalty"] -= action_penalty
+        self._episode_reward_sums["collision_force_penalty"] -= collision_force_penalty
+        self._episode_reward_sums["time_penalty"] -= time_penalty
+        self._episode_reward_sums["task_complete"] += task_complete
+
+        self.extras["log"] = {
+            "Metrics/absorbed_count": self._absorbed_count.mean(),
+            "Metrics/absorbed_delta": self._absorbed_delta.mean(),
+            "Metrics/blood_centroid_distance": self._blood_centroid_distance.mean(),
+            "Metrics/valid_in_cone_ratio": self._valid_in_cone_ratio.mean(),
+            "Metrics/valid_in_inlet_ratio": self._valid_in_inlet_ratio.mean(),
+            "Metrics/absorbed_delta_ema": self._absorbed_delta_ema.mean(),
+            "Metrics/success_rate": (self._absorbed_count >= self._success_threshold).float().mean(),
+        }
+
+        return reward
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         super()._reset_idx(env_ids)
 
-        # Reset end effector controller
-        self.robot_entity_cfg.resolve(self.scene)
-        self.ee_jacobi_idx = self.robot_entity_cfg.body_ids[0] - 1
-        self.diff_ik_controller.reset()
-        self.counter = 0 # Also resets counters
-        self.index_image = 1
-        self.index0 = 1
-        self.actions_new = torch.ones_like(self.actions_new)*self.start_ee_pos # Starting EE position
-        self.actions_total = torch.zeros((self.num_envs,self.cfg.action_space), device=self.device)
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
 
-        # Reset the glass
-        glass_init_pos = self._glass.data.default_root_state.clone()[env_ids]
-        glass_init_pos[:,:3] = glass_init_pos[:,:3] + self.scene.env_origins[env_ids]
-        self._glass.write_root_state_to_sim(glass_init_pos,env_ids=env_ids)
+        if self._ee_jacobi_idx is None:
+            self._resolve_ik_handles()
+        self._ik_controller.reset(env_ids=env_ids)
+        self._update_workspace_bounds()
 
-        # Reset the container
-        container_init_pos = self._container.data.default_root_state.clone()[env_ids]
-        container_init_pos[:,:3] = container_init_pos[:,:3] + self.scene.env_origins[env_ids]
-        lower_bound = torch.tensor([0,-0.1,0],device=self.device)
-        upper_bound = torch.tensor([0,0.1,0],device=self.device)
-        container_init_pos[:,:3] += sample_uniform(lower_bound, upper_bound, container_init_pos[:,:3].shape, self.device) # Randomize
-        self._container.write_root_state_to_sim(container_init_pos,env_ids=env_ids)
+        ids = env_ids.tolist()
+        finished_mask = (
+            self._episode_success[env_ids]
+            | self._episode_joint_limit[env_ids]
+            | self._episode_severe_collision[env_ids]
+            | self._episode_time_out[env_ids]
+        )
+        finished_env_ids = env_ids[finished_mask]
 
-        
-        # Reset the liquid 
-        fill_index = torch.randint(0,3,(env_ids.size(0),))
-        counter_fluid = 0
-        for i in env_ids:
-            init_pos = np.array(self.liquid_init_pos[fill_index[counter_fluid]])
-            init_vel = np.zeros_like(init_pos)
-            self.liquid.set_particles_position(init_pos, init_vel, i)
-            counter_fluid += 1
-        
-        # Reset the robot and randomizes the initial position (to implement)
-        joint_pos = self._robot.data.default_joint_pos[env_ids]
-        joint_pos = torch.clamp(joint_pos, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
+        if finished_env_ids.numel() > 0:
+            if "log" not in self.extras:
+                self.extras["log"] = dict()
+
+            reward_logs = {}
+            for key, values in self._episode_reward_sums.items():
+                reward_logs[f"Episode_Reward/{key}"] = values[finished_env_ids].mean() / self.max_episode_length_s
+
+            success_mask = self._episode_success[finished_env_ids]
+            joint_limit_mask = (~success_mask) & self._episode_joint_limit[finished_env_ids]
+            severe_collision_mask = (~success_mask) & (~joint_limit_mask) & self._episode_severe_collision[finished_env_ids]
+            time_out_mask = (
+                (~success_mask)
+                & (~joint_limit_mask)
+                & (~severe_collision_mask)
+                & self._episode_time_out[finished_env_ids]
+            )
+
+            termination_logs = {
+                "Episode_Termination/success": success_mask.sum().to(dtype=torch.float32),
+                "Episode_Termination/joint_limit": joint_limit_mask.sum().to(dtype=torch.float32),
+                "Episode_Termination/severe_collision": severe_collision_mask.sum().to(dtype=torch.float32),
+                "Episode_Termination/time_out": time_out_mask.sum().to(dtype=torch.float32),
+            }
+            self.extras["log"].update(reward_logs)
+            self.extras["log"].update(termination_logs)
+
+        joint_pos = self._psm.data.default_joint_pos[env_ids]
         joint_vel = torch.zeros_like(joint_pos)
-        joint_pos[:,7:9] = 0.4
-        self._robot.set_joint_position_target(joint_pos, env_ids=env_ids)
-        self._robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
+        self._psm.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
+        self._psm.set_joint_position_target(joint_pos, env_ids=env_ids)
+        self._joint_pos_des[env_ids] = joint_pos[:, self._ik_joint_ids]
 
-        # Need to refresh the intermediate values so that _get_observations() can use the latest values
-        
+        if self._initial_particles_pos is not None:
+            for env_id in ids:
+                self.liquid.set_particles_position(
+                    self._initial_particles_pos.copy(),
+                    self._initial_particles_vel.copy(),
+                    int(env_id),
+                )
+
+        self._suction_controller.reset(ids)
+        self._step_count[env_ids] = 0
+        self._absorbed_count[env_ids] = 0.0
+        self._absorbed_delta[env_ids] = 0.0
+        self._absorbed_delta_ema[env_ids] = 0.0
+        self._blood_centroid_distance[env_ids] = 0.0
+        self._prev_blood_centroid_distance[env_ids] = 0.0
+        self._valid_in_cone_ratio[env_ids] = 0.0
+        self._valid_in_inlet_ratio[env_ids] = 0.0
+        self._severe_contact_counter[env_ids] = 0
+        self._terminated[env_ids] = False
+        for values in self._episode_reward_sums.values():
+            values[env_ids] = 0.0
+        self._episode_success[env_ids] = False
+        self._episode_joint_limit[env_ids] = False
+        self._episode_severe_collision[env_ids] = False
+        self._episode_time_out[env_ids] = False
+        self._raw_actions[env_ids] = 0.0
+        self._ik_commands[env_ids] = 0.0
+        self._obs_state[env_ids] = 0.0
+
+        tip_pos_w, _ = self._compute_tip_pose_and_direction_w()
+        self._ee_goal_pos_w[env_ids] = tip_pos_w[env_ids]
+        self._blood_centroid[env_ids] = tip_pos_w[env_ids]
+        self._prev_blood_centroid[env_ids] = tip_pos_w[env_ids]
+        self._task_state_dirty = True
+        self._task_state_apply_suction = False
 
     def _get_observations(self) -> dict:
+        self._update_low_dim_observation()
 
-        # Camera
-        
-        # Extract and save rgb output from camera
-        camera_data = self._camera.data.output[self.data_type]
-        # Choose whether to save the images or not
-        images_are_being_saved = False
+        if not self._particles_initialized:
+            pos, vel = self.liquid.get_particles_position(0)
+            if len(pos) > 0:
+                self._initial_particles_pos = pos.copy()
+                self._initial_particles_vel = vel.copy()
+                self._particles_initialized = True
 
-        if images_are_being_saved:
-            self.save_image(camera_data/255.0, self.index_image, 0, "rgb")
-        
-        # Process image
-        for i in range(self.num_envs):
-            # Process the image using PourIt
-            pourit_output = torch.tensor(self.predictor.inference(camera_data[i].cpu().numpy(), input_size=(self.obs["camera"].shape[2],self.obs["camera"].shape[3])), device = self.device)
-        
-            # Use mask as observation
-            self.obs["camera"][i] = torch.tensor(pourit_output, device = self.device)
-            # Save processed image in output folder
-            if images_are_being_saved:
-                self.save_image(pourit_output.permute([0,2,3,1]), self.index_image, i, "processed")
+        self._step_count += 1
 
-        self.index_image +=1 # Index for saving the images
-        # Subtract the mean from the camera input
-        mean_tensor = torch.mean(self.obs["camera"], dim=(2, 3), keepdim=True)
-        self.obs["camera"] -= mean_tensor
-
-        # Calculate the relative position of the source container
-        # Get quantities from the environment
-        source_pos = self._glass.data.root_pos_w - self.scene.env_origins
-        source_rot = self._glass.data.body_quat_w
-        source_vel = self._glass.data.root_lin_vel_w
-        source_rot_vel = self._glass.data.root_ang_vel_w
-        target_pos = self._container.data.root_pos_w - self.scene.env_origins
-        
-        # Scaled joint quantities
-        dof_pos_scaled = (
-            2.0
-            * (self._robot.data.joint_pos[:,:7] - self.robot_dof_lower_limits[:7])
-            / (self.robot_dof_upper_limits[:7] - self.robot_dof_lower_limits[:7])
-            - 1.0
-        )
-        joint_vel = self._robot.data.joint_vel[:,:7] * 0.1
-
-        # Relative position
-        relative_pos = source_pos - target_pos
-
-        # Rotation conversion to euler
-        source_rot = self.quaternion_to_euler(source_rot)[:,:,0]/torch.pi
-
-        # Compute reward for each environment to use as observation
-        for i in range (self.num_envs):
-            pos, vel = self.liquid.get_particles_position(i)
-
-            self.obs_reward_in[i], self.obs_reward_out[i] = self.particle_fractions_func(target=target_pos[i].cpu().numpy(),
-                                particles=pos,
-                                limit_height=self.cfg.container_height,
-                                radius=self.cfg.container_radius,)
-            
-        obs_reward_in = torch.tensor(self.obs_reward_in, device = self.device).unsqueeze(1)
-        obs_reward_out = torch.tensor(self.obs_reward_out, device = self.device).unsqueeze(1)
-        
-        # Concatenate observations
-        self.obs["position"] = torch.cat((relative_pos[:,1].unsqueeze(1), source_rot, self.actions_raw), dim=-1).type(torch.float32)
-        # self.obs["position"] = torch.cat((source_rot, self.actions_raw, obs_reward_in, obs_reward_out), dim=-1).type(torch.float32)
-
-        # print("Source rotation: "+str(source_rot))
-        # print("Observed reward in: "+str(obs_reward_in))
-        # print("Observed reward out: "+str(obs_reward_out))
-        # print("Relative pos: "+str(relative_pos[:,1].unsqueeze(1)))
-        # print("Previous actions: "+str(self.actions_raw))
-        # print("***")
-
-        observations = {"policy": {"camera": self.obs["camera"].clone(),"position": self.obs["position"].clone()}}
-
-        return observations
-
-    # auxiliary methods
-
-    def multiply_quaternions(self, q1, q2):
-        """
-        Multiply two quaternions.
-        """
-
-        w1 = q1[:, 0]
-        x1 = q1[:, 1]
-        y1 = q1[:, 2]
-        z1 = q1[:, 3]
-        w2 = q2[:, 0]
-        x2 = q2[:, 1]
-        y2 = q2[:, 2]
-        z2 = q2[:, 3]
-
-        w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
-        x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
-        y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
-        z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
-        w = torch.unsqueeze(w,1)
-        x = torch.unsqueeze(x,1)
-        y = torch.unsqueeze(y,1)
-        z = torch.unsqueeze(z,1)
-
-        return torch.cat((w, x, y, z),dim=-1)
-
-    def compute_reward(self, 
-                       particles_inside: torch.tensor, 
-                       particles_outside: torch.tensor,
-                       source_pos: torch.tensor,
-                       target_pos: torch.tensor,
-                       source_vel: torch.tensor,
-                       joint_vel: torch.tensor,
-                       actions: torch.tensor,
-                       limit_height: float,
-                       inside_weight: float, 
-                       outside_weight: float,
-                       source_pos_weight: float,
-                       source_ground_weight: float,
-                       source_vel_weight: float,
-                       joint_vel_weight: float,
-                       actions_weight: float):
-            """
-            Computes the reward by considering the fraction of particles inside the target container and outside of it
-            """
-
-            # The weighted reward output is the fraction of insideoutside particles w.r.t. the total number of particles
-            reward_in = inside_weight*particles_inside
-            reward_out = outside_weight*particles_outside
-            # reward_in = inside_weight*torch.where(particles_inside<0.5,particles_inside,0.5)
-            # reward_out = outside_weight*(particles_outside+torch.where(particles_inside>0.5,particles_inside-0.5,0))
-
-            # Penalty for source distant from target 
-            dist = torch.norm(source_pos-target_pos, dim=1)
-            relative_pos = source_pos-target_pos
-            reward_dist = torch.zeros((self.num_envs, 1))
-            reward_dist += torch.where((relative_pos[:,1]>0) | (relative_pos[:,1]<-0.25), 1., 0.).unsqueeze(1)
-            reward_dist = source_pos_weight*reward_dist
-
-            # Penalty for source glass on the ground or too low
-            reward_ground = torch.zeros((self.num_envs, 1))
-            reward_ground += torch.where(source_pos[:,2]<limit_height, 1., 0.).unsqueeze(1)
-            reward_ground = source_ground_weight*reward_ground
-
-            # Penalty for fast movements of the source container
-            vel = torch.norm(source_vel, dim=1)
-            reward_vel = torch.zeros((self.num_envs, 1))
-            reward_vel += torch.where(vel>2., 1., 0.).unsqueeze(1)
-            reward_vel = source_vel_weight*reward_vel
-
-            # Penalty for joint velocities
-            reward_joint_vel = torch.sum(joint_vel**2, dim=-1)
-            reward_joint_vel = joint_vel_weight*reward_joint_vel.unsqueeze(1)
-
-            # Penalty for action magnitude
-            reward_actions = torch.sum(actions**2, dim=-1)
-            reward_actions= actions_weight*reward_actions.unsqueeze(1)
-
-
-            # print("Reward distance: "+str(reward_dist))
-            # print("Reward joint vel: "+str(reward_joint_vel))
-            # print("Reward actions: "+str(reward_actions))
-            # print("Reward in: "+str(reward_in))
-            # print("Reward out: "+str(reward_out))
-            # print("***")
-
-            reward_tot = reward_in + reward_out + reward_dist + reward_ground + reward_vel + reward_joint_vel +reward_actions
-
-            return reward_tot
-    
-    def particle_fractions_func(self, 
-                       target: np.array,
-                       particles: np.array, 
-                       limit_height: float,
-                       radius: float,) -> tuple[np.array, np.array]:
-            """
-            Computes fraction of particles inside the target container and outside of it
-            Used for both the reward and the observations
-            """
-
-            # Only considers particles below a certain limit height, which is ideally the target container's height
-            index = np.where(particles[:,2]<=limit_height)
-
-            x = particles[index,0]
-            y = particles[index,1]
-            z = particles[index,2]
-
-            x_0 = target[0]
-            y_0 = target[1]
-
-            # Calculates particles inside if they are inside the round container's radius 
-            num_particles = len(particles)
-            index_inside = np.where(((x-x_0)**2+(y-y_0)**2 < radius**2))
-            particles_inside = np.size(index_inside, 1)/num_particles
-
-            # Calculates particles outside if they are outside the round container's radius
-            index_outside = np.where((x-x_0)**2+(y-y_0)**2 >= radius**2)
-            particles_outside = np.size(index_outside, 1)/num_particles
-
-            return particles_inside, particles_outside
-
-    def quaternion_to_euler(self, q):
-        """
-        Convert quaternion (w, x, y, z) to Euler angles (roll, pitch, yaw).
-        
-        Parameters:
-        q (torch.Tensor): A tensor of shape (..., 4) where each quaternion is represented by 
-                        (w, x, y, z). The last dimension should have 4 elements representing 
-                        the quaternion.
-
-        Returns:
-        torch.Tensor: A tensor of shape (..., 3) representing the Euler angles (roll, pitch, yaw).
-        """
-        w, x, y, z = torch.split(q, 1, dim=-1)  # Split quaternion into w, x, y, z components
-        
-        # Compute roll (x-axis rotation)
-        roll = torch.atan2(2 * (w * x + y * z), 1 - 2 * (x**2 + y**2))
-        
-        # Compute pitch (y-axis rotation)
-        pitch = torch.asin(torch.clamp(2 * (w * y - z * x), -1.0, 1.0))
-        
-        # Compute yaw (z-axis rotation)
-        yaw = torch.atan2(2 * (w * z + x * y), 1 - 2 * (y**2 + z**2))
-        
-        # Stack Euler angles (roll, pitch, yaw) into a tensor
-        euler_angles = torch.cat((roll, pitch, yaw), dim=-1)
-        
-        return euler_angles
-
-    def save_image(self, file, index_image, index_env, name):
-        # Save images from camera 
-        if not torch.is_tensor(file):
-            file = torch.tensor(file, device=self.device)
-        # Adjust dimensions
-        if len(file.shape)<4:
-            file = torch.unsqueeze(file, 0)
-        # Expand number of channels
-        if file.shape[3]==1:
-            #print(file.unique())
-            file_new = torch.zeros((file.shape[0],file.shape[1],file.shape[2],3), device=self.device)
-            file_new[:] = file 
-            file = file_new
-            #print(file.unique())
-        save_images_to_file(file, f"{self.cfg.CURRENT_PATH}/output/camera/{name}_{index_env}_{index_image}.png")
-
-
-
-
-
-
-
-
-
-    
+        return {"policy": self._obs_state.clone()}
