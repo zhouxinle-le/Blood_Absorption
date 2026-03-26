@@ -50,7 +50,7 @@ from omni.isaac.lab_tasks.utils.wrappers.rsl_rl import (
 )
 
 # Import extensions to set up environment tasks
-import pouring_ext.tasks  # noqa: F401
+import blood_absorption.tasks  # noqa: F401
 
 
 def main():

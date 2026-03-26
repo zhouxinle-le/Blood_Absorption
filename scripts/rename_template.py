@@ -1,29 +1,76 @@
+"""Rename the current extension project to a new project name."""
+
 import os
 import sys
 from pathlib import Path
 
-"""This script can be used to rename the template project to a new project name.
-It renames all the occurrences of pouring_ext (in files, directories, etc.) to the new project name.
-"""
+
+TEMPLATE_NAME = "pouring_ext"
+EXCLUDE_DIRS = {".git", "__pycache__"}
 
 
-def rename_file_contents(root_dir_path: str, old_name: str, new_name: str, exclude_dirs: list = []):
-    """Rename all instances of the old keyword to the new keyword in all files in the root directory.
+def detect_current_name(root_dir: Path) -> str:
+    """Detect the current extension/package name from the exts directory."""
+    ext_dirs = [path for path in (root_dir / "exts").iterdir() if path.is_dir()]
+    candidates = []
+    for ext_dir in ext_dirs:
+        package_dir = ext_dir / ext_dir.name
+        if package_dir.is_dir() and (ext_dir / "setup.py").exists():
+            candidates.append(ext_dir.name)
+    if len(candidates) != 1:
+        raise RuntimeError(f"Expected exactly one extension under {root_dir / 'exts'}, found: {candidates}")
+    return candidates[0]
 
-    Args:
-        root_dir_path (str): The root directory path.
-        old_name (str): The old keyword to replace.
-        new_name (str): The new keyword to replace with.
-    """
-    for dirpath, _, files in os.walk(root_dir_path):
-        if any(exclude_dir in dirpath for exclude_dir in exclude_dirs):
+
+def should_skip_dir(path: Path) -> bool:
+    """Check if a directory should be excluded from traversal."""
+    return any(part in EXCLUDE_DIRS for part in path.parts)
+
+
+def replace_names(text: str, source_names: list[str], new_name: str) -> str:
+    """Replace all source names with the new name."""
+    for source_name in source_names:
+        text = text.replace(source_name, new_name)
+    return text
+
+
+def rename_file_contents(root_dir: Path, source_names: list[str], new_name: str) -> int:
+    """Rename all source names to the new keyword in text files under the root directory."""
+    updated_files = 0
+    for dirpath, dirnames, files in os.walk(root_dir):
+        current_dir = Path(dirpath)
+        dirnames[:] = [dirname for dirname in dirnames if not should_skip_dir(current_dir / dirname)]
+        if should_skip_dir(current_dir):
             continue
         for file_name in files:
-            with open(os.path.join(dirpath, file_name)) as file:
-                file_contents = file.read()
-            file_contents = file_contents.replace(old_name, new_name)
-            with open(os.path.join(dirpath, file_name), "w") as file:
-                file.write(file_contents)
+            file_path = current_dir / file_name
+            try:
+                file_contents = file_path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+
+            renamed_contents = replace_names(file_contents, source_names, new_name)
+            if renamed_contents == file_contents:
+                continue
+
+            file_path.write_text(renamed_contents, encoding="utf-8")
+            updated_files += 1
+    return updated_files
+
+
+def rename_paths(root_dir: Path, source_names: list[str], new_name: str) -> int:
+    """Rename files and directories containing any of the source names."""
+    renamed_paths = 0
+    all_paths = sorted(root_dir.rglob("*"), key=lambda path: len(path.parts), reverse=True)
+    for path in all_paths:
+        if should_skip_dir(path):
+            continue
+        renamed_name = replace_names(path.name, source_names, new_name)
+        if renamed_name == path.name:
+            continue
+        path.rename(path.with_name(renamed_name))
+        renamed_paths += 1
+    return renamed_paths
 
 
 if __name__ == "__main__":
@@ -31,21 +78,23 @@ if __name__ == "__main__":
         print("Usage: python rename_template.py <new_name>")
         sys.exit(1)
 
-    root_dir_path = str(Path(__file__).resolve().parent.parent)
-    old_name = "pouring_ext"
+    root_dir = Path(__file__).resolve().parent.parent
     new_name = sys.argv[1]
+    current_name = detect_current_name(root_dir)
+    source_names = []
+    for source_name in [current_name, TEMPLATE_NAME]:
+        if source_name != new_name and source_name not in source_names:
+            source_names.append(source_name)
 
-    print(f"Warning, this script will rename all instances of '{old_name}' to '{new_name}' in {root_dir_path}.")
+    print(
+        f"Warning, this script will rename all instances of {source_names or [current_name]} "
+        f"to '{new_name}' in {root_dir}."
+    )
     proceed = input("Proceed? (y/n): ")
 
     if proceed.lower() == "y":
-        # rename the pouring_ext folder
-        os.rename(
-            os.path.join(root_dir_path, "exts", "pouring_ext", "pouring_ext"),
-            os.path.join(root_dir_path, "exts", "pouring_ext", new_name),
-        )
-        os.rename(os.path.join(root_dir_path, "exts", "pouring_ext"), os.path.join(root_dir_path, "exts", new_name))
-        # rename the file contents
-        rename_file_contents(root_dir_path, old_name, new_name, exclude_dirs=[".git"])
+        updated_files = rename_file_contents(root_dir, source_names, new_name)
+        renamed_paths = rename_paths(root_dir / "exts", source_names, new_name)
+        print(f"Updated {updated_files} text files and renamed {renamed_paths} paths.")
     else:
         print("Aborting.")
