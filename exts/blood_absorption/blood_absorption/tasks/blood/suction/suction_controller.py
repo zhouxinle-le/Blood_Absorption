@@ -4,7 +4,7 @@ import math
 
 import numpy as np
 
-from .geometry import compute_cone_and_inlet_masks, compute_particle_relation, compute_tip_pose_numpy
+from .geometry import compute_cone_and_inlet_masks, compute_particle_relation
 
 
 class SuctionControllerNoTimer:
@@ -14,24 +14,30 @@ class SuctionControllerNoTimer:
         self.cfg = cfg
         self._num_envs = int(num_envs)
         self._tip_body_idx: int | None = None
-        self._tip_local_offset = np.asarray(getattr(self.cfg, "psm_tip_local_offset", (0.0, 0.0, 0.0)), dtype=np.float32)
-        self._tip_local_axis = np.asarray(getattr(self.cfg, "psm_tip_local_axis", (0.0, 0.0, -1.0)), dtype=np.float32)
-        axis_norm = np.linalg.norm(self._tip_local_axis)
-        self._tip_local_axis = self._tip_local_axis / axis_norm
 
     def reset(self, env_ids) -> None:
         return None
 
-    def step(self, psm, liquid, glass2, env_origins) -> dict[str, np.ndarray]:
-        if hasattr(env_origins, "detach"):
-            env_origins = env_origins.detach().cpu().numpy()
-        env_origins = np.asarray(env_origins, dtype=np.float32)
+    def step(
+        self,
+        tip_pos_local_np: np.ndarray,
+        tip_dir_w_np: np.ndarray,
+        liquid,
+        glass2,
+        env_origins_np: np.ndarray,
+        apply_suction: bool,
+    ) -> dict[str, np.ndarray]:
         num_envs = self._num_envs
 
         absorbed_delta = np.zeros((num_envs,), dtype=np.float32)
         min_dist = np.full((num_envs,), float(self.cfg.suction_cone_range), dtype=np.float32)
         inlet_count = np.zeros((num_envs,), dtype=np.float32)
         cone_count = np.zeros((num_envs,), dtype=np.float32)
+        
+        # New stats for ParticleTaskTracker
+        blood_centroid_w = np.zeros((num_envs, 3), dtype=np.float32)
+        valid_in_cone_ratio = np.zeros((num_envs,), dtype=np.float32)
+        valid_in_inlet_ratio = np.zeros((num_envs,), dtype=np.float32)
 
         dt = float(self.cfg.sim.dt * self.cfg.decimation)
         suction_radius = float(self.cfg.suction_cone_range)
@@ -41,7 +47,12 @@ class SuctionControllerNoTimer:
         particle_mass = max(float(self.cfg.liquidCfg.particle_mass), epsilon)
 
         for env_idx in range(num_envs):
-            tip_pos, tip_dir = self._get_tip_pose(env_idx, psm, env_origins)
+            tip_pos = tip_pos_local_np[env_idx]
+            tip_dir = tip_dir_w_np[env_idx]
+            
+            # Default empty centroid to current tip pos world
+            blood_centroid_w[env_idx] = tip_pos + env_origins_np[env_idx]
+
             particles_pos, particles_vel = liquid.read_particles(env_idx)
             if len(particles_pos) == 0:
                 continue
@@ -49,6 +60,11 @@ class SuctionControllerNoTimer:
             valid_mask = particles_pos[:, self.cfg.height_axis] >= float(self.cfg.height_limit)
             if not valid_mask.any():
                 continue
+
+            valid_positions = particles_pos[valid_mask]
+            centroid_local = valid_positions.mean(axis=0)
+            blood_centroid_w[env_idx] = centroid_local + env_origins_np[env_idx]
+            valid_count = max(valid_positions.shape[0], 1)
 
             relative_positions, distances, axial_depth, radial_distance = compute_particle_relation(
                 particles_pos,
@@ -68,22 +84,29 @@ class SuctionControllerNoTimer:
                 inlet_radius=float(self.cfg.inlet_radius),
                 epsilon=epsilon,
             )
-            in_cone = self._apply_manual_suction(
-                particles_vel=particles_vel,
-                relative_positions=relative_positions,
-                distances=distances,
-                in_cone=in_cone,
-                force_scale=force_scale,
-                particle_mass=particle_mass,
-                epsilon=epsilon,
-                dt=dt,
-            )
+            if apply_suction:
+                in_cone = self._apply_manual_suction(
+                    particles_vel=particles_vel,
+                    relative_positions=relative_positions,
+                    distances=distances,
+                    in_cone=in_cone,
+                    force_scale=force_scale,
+                    particle_mass=particle_mass,
+                    epsilon=epsilon,
+                    dt=dt,
+                )
+                
             remove_mask = in_inlet
 
-            inlet_count[env_idx] = float(in_inlet.sum())
-            cone_count[env_idx] = float(in_cone.sum())
+            in_inlet_sum = float(in_inlet.sum())
+            in_cone_sum = float(in_cone.sum())
+            
+            inlet_count[env_idx] = in_inlet_sum
+            cone_count[env_idx] = in_cone_sum
+            valid_in_cone_ratio[env_idx] = in_cone_sum / float(valid_count)
+            valid_in_inlet_ratio[env_idx] = in_inlet_sum / float(valid_count)
 
-            if remove_mask.any():
+            if apply_suction and remove_mask.any():
                 absorbed_delta[env_idx] = float(
                     self._transfer_particles(
                         env_idx=env_idx,
@@ -91,46 +114,23 @@ class SuctionControllerNoTimer:
                         particles_pos=particles_pos,
                         particles_vel=particles_vel,
                         glass2=glass2,
-                        env_origins=env_origins,
+                        env_origins=env_origins_np,
                     )
                 )
 
-            self._limit_particle_speed(particles_vel)
-            liquid.write_particles(env_idx, particles_pos, particles_vel)
+            if apply_suction:
+                self._limit_particle_speed(particles_vel)
+                liquid.write_particles(env_idx, particles_pos, particles_vel)
 
         return {
             "absorbed_delta": absorbed_delta,
             "min_dist": min_dist,
             "inlet_count": inlet_count,
             "cone_count": cone_count,
+            "blood_centroid_w": blood_centroid_w,
+            "valid_in_cone_ratio": valid_in_cone_ratio,
+            "valid_in_inlet_ratio": valid_in_inlet_ratio,
         }
-
-    def _resolve_tip_body_idx(self, psm) -> int:
-        if self._tip_body_idx is None:
-            body_names = list(psm.body_names)
-            body_name = str(getattr(self.cfg, "psm_tip_body_name", ""))
-            if body_name not in body_names:
-                available = ", ".join(body_names)
-                raise RuntimeError(f"Required PSM tip body '{body_name}' not found. Available bodies: {available}")
-            self._tip_body_idx = body_names.index(body_name)
-        return self._tip_body_idx
-
-    def _get_tip_pose(self, env_idx: int, psm, env_origins: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        tip_body_idx = self._resolve_tip_body_idx(psm)
-
-        tip_body_pos_w = psm.data.body_pos_w[env_idx, tip_body_idx].cpu().numpy()
-        body_quat_w = None
-        if hasattr(psm.data, "body_quat_w"):
-            body_quat_w = psm.data.body_quat_w[env_idx, tip_body_idx].cpu().numpy()
-
-        return compute_tip_pose_numpy(
-            tip_body_pos_w=tip_body_pos_w,
-            tip_local_offset=self._tip_local_offset,
-            tip_local_axis=self._tip_local_axis,
-            body_quat_w=body_quat_w,
-            use_body_quat_for_tip_dir=bool(self.cfg.use_body_quat_for_tip_dir),
-            env_origin=env_origins[env_idx],
-        )
 
     def _apply_manual_suction(
         self,

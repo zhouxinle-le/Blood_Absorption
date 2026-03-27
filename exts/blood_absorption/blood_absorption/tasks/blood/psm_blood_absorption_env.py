@@ -528,22 +528,27 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             return
 
         tip_pos_w, tip_dir_w = self._compute_tip_pose_and_direction_w()
-        suction_stats = None
-        if self._task_state_apply_suction:
-            suction_stats = self._suction_controller.step(
-                psm=self._psm,
-                liquid=self.liquid,
-                glass2=self._glass2,
-                env_origins=self.scene.env_origins,
-            )
+        
+        # 准备传入底层 NumPy 接口的坐标数组
+        env_origins_np = self.scene.env_origins.detach().cpu().numpy()
+        tip_pos_local_np = (tip_pos_w - self.scene.env_origins).detach().cpu().numpy()
+        tip_dir_w_np = tip_dir_w.detach().cpu().numpy()
 
-        self._particle_task_tracker.refresh(
+        # 一步运算，拿到吸血结果和当前统计指标
+        particle_stats = self._suction_controller.step(
+            tip_pos_local_np=tip_pos_local_np,
+            tip_dir_w_np=tip_dir_w_np,
             liquid=self.liquid,
+            glass2=self._glass2,
+            env_origins_np=env_origins_np,
+            apply_suction=self._task_state_apply_suction,
+        )
+
+        # Tracker 纯粹更新 Torch 张量和时序奖励指标
+        self._particle_task_tracker.refresh(
             tip_pos_w=tip_pos_w,
-            tip_dir_w=tip_dir_w,
-            env_origins=self.scene.env_origins,
             step_count=self._step_count,
-            suction_stats=suction_stats,
+            particle_stats=particle_stats,
         )
         self._task_state_dirty = False
         self._task_state_apply_suction = False
