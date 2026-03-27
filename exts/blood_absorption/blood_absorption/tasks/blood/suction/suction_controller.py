@@ -33,8 +33,7 @@ class SuctionControllerNoTimer:
         cone_count = np.zeros((num_envs,), dtype=np.float32)     # 受到吸力影响的粒子数
 
         # 预先提取一些物理参数以加快循环内的计算速度
-        # dt = float(self.cfg.sim.dt * self.cfg.decimation)
-        dt = self.cfg.sim.dt
+        dt = float(self.cfg.sim.dt * self.cfg.decimation)
         suction_radius = float(self.cfg.suction_cone_range)
         cos_theta = math.cos(math.radians(float(self.cfg.suction_cone_half_angle_deg)))
         epsilon = max(float(getattr(self.cfg, "suction_epsilon", 1e-6)), 1e-12) # 防止除以0

@@ -780,8 +780,9 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
                 self.extras["log"] = dict()
 
             reward_logs = {}
+            actual_steps = self._step_count[finished_env_ids].float().clamp_min(1.0)
             for key, values in self._episode_reward_sums.items():
-                reward_logs[f"Episode_Reward/{key}"] = values[finished_env_ids].mean() / self.max_episode_length_s
+                reward_logs[f"Episode_Reward/{key}"] = (values[finished_env_ids] / actual_steps).mean()
 
             success_mask = self._episode_success[finished_env_ids]
             joint_limit_mask = (~success_mask) & self._episode_joint_limit[finished_env_ids]
@@ -794,10 +795,10 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             )
 
             termination_logs = {
-                "Episode_Termination/success": success_mask.sum().to(dtype=torch.float32),
-                "Episode_Termination/joint_limit": joint_limit_mask.sum().to(dtype=torch.float32),
-                "Episode_Termination/severe_collision": severe_collision_mask.sum().to(dtype=torch.float32),
-                "Episode_Termination/time_out": time_out_mask.sum().to(dtype=torch.float32),
+                "Episode_Termination/success": success_mask.float().mean(),
+                "Episode_Termination/joint_limit": joint_limit_mask.float().mean(),
+                "Episode_Termination/severe_collision": severe_collision_mask.float().mean(),
+                "Episode_Termination/time_out": time_out_mask.float().mean(),
             }
             self.extras["log"].update(reward_logs)
             self.extras["log"].update(termination_logs)
