@@ -1,8 +1,12 @@
-from omni.physx.scripts import physicsUtils, particleUtils
-from omni.isaac.core.utils.stage import get_current_stage
-from pxr import Usd, UsdShade, UsdGeom, Sdf, Gf, Vt, PhysxSchema
+from __future__ import annotations
+
+from collections.abc import Iterable
+
 import numpy as np
 import omni.kit.commands
+from omni.isaac.core.utils.stage import get_current_stage
+from omni.physx.scripts import particleUtils, physicsUtils
+from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdShade, Vt
 
 
 class FluidObjectCfg():
@@ -34,8 +38,10 @@ class FluidObject():
         self.stage.SetDefaultPrim(self.default_prim)
         self.default_prim_path = self.stage.GetDefaultPrim().GetPath()
         self.scenePath = Sdf.Path("/physicsScene")
-        
-    
+        self._particle_paths: dict[int, Sdf.Path] = {}
+        self._particle_prims: dict[int, UsdGeom.Points] = {}
+        self._initial_particles_pos: np.ndarray | None = None
+        self._initial_particles_vel: np.ndarray | None = None
 
     def spawn_fluid_direct(self, env_index: int = 0):
             
@@ -44,6 +50,7 @@ class FluidObject():
 
             # Particle points
             self.particlesPath = Sdf.Path(f"/World/envs/env_{env_index}/particles")
+            self._particle_paths[env_index] = self.particlesPath
 
             # solver iterations
             self._solverPositionIterations = 4
@@ -172,19 +179,56 @@ class FluidObject():
             # 粒子可见性设置：invisible 隐藏粒子点，只显示等值面
             visibility_attribute = self.particlesPrim.GetVisibilityAttr()
             visibility_attribute.Set("invisible")
+            self._particle_prims[env_index] = UsdGeom.Points(self.stage.GetPrimAtPath(self.particlesPath))
 
+    @property
+    def has_initial_state(self) -> bool:
+        return self._initial_particles_pos is not None and self._initial_particles_vel is not None
 
-    def get_particles_position(self, env_id: int)->tuple[np.array, np.array]:
-        # Gets particles' positions in the input environment and velocities and outputs them as arrays
+    def _get_particles_path(self, env_id: int) -> Sdf.Path:
+        if env_id not in self._particle_paths:
+            self._particle_paths[env_id] = self.default_prim_path.AppendPath(f"envs/env_{env_id}/particles")
+        return self._particle_paths[env_id]
 
-        particles = UsdGeom.Points(self.stage.GetPrimAtPath(self.default_prim_path.AppendPath(f"envs/env_{env_id}/particles")))
+    def _get_particles_prim(self, env_id: int) -> UsdGeom.Points:
+        if env_id not in self._particle_prims:
+            self._particle_prims[env_id] = UsdGeom.Points(self.stage.GetPrimAtPath(self._get_particles_path(env_id)))
+        return self._particle_prims[env_id]
+
+    def read_particles(self, env_id: int) -> tuple[np.ndarray, np.ndarray]:
+        particles = self._get_particles_prim(env_id)
         particles_pos = np.array(particles.GetPointsAttr().Get())
         particles_vel = np.array(particles.GetVelocitiesAttr().Get())
-
         return particles_pos, particles_vel
 
-    def set_particles_position(self, particles_pos: np.array, particles_vel: np.array, env_id:int):
-        # Sets the particles' position and velocities to the given arrays
-        particles = UsdGeom.Points(self.stage.GetPrimAtPath(self.default_prim_path.AppendPath("envs/env_%d/particles" % env_id)))
-        particles.GetPointsAttr().Set(Vt.Vec3fArray.FromNumpy(particles_pos))
-        particles.GetVelocitiesAttr().Set(Vt.Vec3fArray.FromNumpy(particles_vel))
+    def write_particles(self, env_id: int, positions: np.ndarray, velocities: np.ndarray) -> None:
+        particles = self._get_particles_prim(env_id)
+        particles.GetPointsAttr().Set(Vt.Vec3fArray.FromNumpy(np.asarray(positions, dtype=np.float32)))
+        particles.GetVelocitiesAttr().Set(Vt.Vec3fArray.FromNumpy(np.asarray(velocities, dtype=np.float32)))
+
+    def capture_initial_state(self, env_id: int = 0) -> tuple[np.ndarray, np.ndarray]:
+        positions, velocities = self.read_particles(env_id)
+        self._initial_particles_pos = positions.copy()
+        self._initial_particles_vel = velocities.copy()
+        return self._initial_particles_pos.copy(), self._initial_particles_vel.copy()
+
+    def reset_particles(
+        self,
+        env_ids: Iterable[int],
+        positions: np.ndarray | None = None,
+        velocities: np.ndarray | None = None,
+    ) -> None:
+        if positions is None or velocities is None:
+            if not self.has_initial_state:
+                return
+            positions = self._initial_particles_pos
+            velocities = self._initial_particles_vel
+
+        for env_id in env_ids:
+            self.write_particles(int(env_id), np.asarray(positions).copy(), np.asarray(velocities).copy())
+
+    def get_particles_position(self, env_id: int) -> tuple[np.ndarray, np.ndarray]:
+        return self.read_particles(env_id)
+
+    def set_particles_position(self, particles_pos: np.ndarray, particles_vel: np.ndarray, env_id: int):
+        self.write_particles(env_id, particles_pos, particles_vel)

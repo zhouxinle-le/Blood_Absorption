@@ -2,14 +2,10 @@ from __future__ import annotations
 
 import os
 
-import numpy as np
 import torch
 
-from pxr import Gf
-from omni.isaac.core.utils.stage import get_current_stage
-
+import carb.settings
 import omni.isaac.lab.sim as sim_utils
-
 from omni.isaac.lab.actuators.actuator_cfg import ImplicitActuatorCfg
 from omni.isaac.lab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
 from omni.isaac.lab.controllers import DifferentialIKController, DifferentialIKControllerCfg
@@ -24,22 +20,21 @@ from omni.isaac.lab.terrains import TerrainImporterCfg
 from omni.isaac.lab.utils import configclass
 from omni.isaac.lab.utils.math import subtract_frame_transforms
 from omni.physx import acquire_physx_interface
-import carb.settings
+from pxr import Gf
 
 from .fluid_object import FluidObject, FluidObjectCfg
 from .suction.suction_controller import SuctionControllerNoTimer
+from .task_state import ParticleRewardInputs, ParticleTaskState, ParticleTaskTracker
 
 
 @configclass
 class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
-    # 环境配置
     episode_length_s = 10
     decimation = 2
     action_space = 3
     state_space = 0
     observation_space = 18
 
-    # 仿真配置
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 120,
         render_interval=2,
@@ -56,7 +51,6 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    # 场景配置
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=16,
         env_spacing=3.0,
@@ -127,7 +121,6 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     liquidCfg.particleSpacing = 0.004
     liquidCfg.viscosity = 3.5
 
-    # PSM机器人配置
     psm_robot = ArticulationCfg(
         prim_path="/World/envs/env_.*/PSM",
         spawn=sim_utils.UsdFileCfg(
@@ -176,12 +169,8 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
         soft_joint_pos_limit_factor=1.0,
     )
 
-    # Differential IK 动作配置
     ik_joint_names = (
-        # "psm_rev_joint",
         "psm_yaw_joint",
-        # "psm_pitch_back_joint",
-        # "psm_pitch_bottom_joint",
         "psm_pitch_end_joint",
         "psm_main_insertion_joint",
     )
@@ -193,7 +182,6 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     workspace_low_offset = (-0.10, -0.10, -0.02)
     workspace_high_offset = (0.10, 0.10, 0.30)
 
-    # 吸附参数
     psm_tip_body_name = "suction_tool_end_link"
     psm_tip_local_offset = (0.0, -0.011957148076033514, 0.0)
     psm_tip_local_axis = (0.0, -1.0, 0.0)
@@ -210,7 +198,6 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     outflow_speed = 0.02
     max_particle_speed = 0.4
 
-    # 奖励参数
     reward_absorb_weight = 6.0
     centroid_progress_weight = 100.0
     centroid_progress_clip = 0.02
@@ -224,7 +211,6 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     severe_contact_force_threshold = 2.0
     severe_contact_patience = 2
 
-    # 成功条件
     success_absorption_ratio = 0.75
     joint_limit_termination_tolerance = 1e-3
 
@@ -242,28 +228,25 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         self._ee_jacobi_idx: int | None = None
         super().__init__(cfg, render_mode, **kwargs)
 
-        self.stage = get_current_stage()
-        self._suction_controller = SuctionControllerNoTimer(cfg=cfg, num_envs=self.num_envs)
+        self._init_scene_runtime_state()
+        self._init_particle_task_state()
+        self._init_episode_stats()
+        self._init_robot_control_state()
+        self._init_observation_cache()
 
-        self._initial_particles_pos = None
-        self._initial_particles_vel = None
-        self._particles_initialized = False
-
-        self._step_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self._absorbed_count = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-        self._absorbed_delta = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-        self._absorbed_delta_ema = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-        self._blood_centroid = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
-        self._prev_blood_centroid = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
-        self._blood_centroid_distance = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-        self._prev_blood_centroid_distance = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-        self._valid_in_cone_ratio = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-        self._valid_in_inlet_ratio = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+    def _init_scene_runtime_state(self) -> None:
+        self._suction_controller = SuctionControllerNoTimer(cfg=self.cfg, num_envs=self.num_envs)
         self._task_state_dirty = True
         self._task_state_apply_suction = False
-        self._severe_contact_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self._terminated = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self._episode_reward_sums = {
+        self._reward_cache_dirty = True
+        self._done_cache_dirty = True
+        self._observation_pending = True
+
+    def _init_particle_task_state(self) -> None:
+        self._particle_task_tracker = ParticleTaskTracker(cfg=self.cfg, num_envs=self.num_envs, device=self.device)
+
+    def _build_episode_reward_sums(self) -> dict[str, torch.Tensor]:
+        return {
             "absorb_reward": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
             "centroid_progress_reward": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
             "cone_coverage_reward": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
@@ -273,11 +256,20 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             "time_penalty": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
             "task_complete": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
         }
+
+    def _init_episode_stats(self) -> None:
+        self._step_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._severe_contact_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._episode_reward_sums = self._build_episode_reward_sums()
         self._episode_success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._episode_joint_limit = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._episode_severe_collision = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._episode_time_out = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._reward_cache = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self._terminated_cache = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._truncated_cache = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
+    def _init_robot_control_state(self) -> None:
         self._raw_actions = torch.zeros((self.num_envs, self.cfg.action_space), dtype=torch.float32, device=self.device)
 
         self._expected_particle_count = float(
@@ -289,62 +281,72 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         self._joint_upper_limits = self._psm.data.soft_joint_pos_limits[0, :, 1].to(device=self.device)
 
         joint_names = list(self._psm.data.joint_names)
-        self._joint_name_to_idx = {name: idx for idx, name in enumerate(joint_names)}
-        self._ik_joint_ids = [self._joint_name_to_idx[name] for name in self.cfg.ik_joint_names]
-        self._tool_joint_ids = [self._joint_name_to_idx[name] for name in self.cfg.tool_joint_names]
+        joint_name_to_idx = {name: idx for idx, name in enumerate(joint_names)}
+        self._ik_joint_ids = [joint_name_to_idx[name] for name in self.cfg.ik_joint_names]
+        self._tool_joint_ids = [joint_name_to_idx[name] for name in self.cfg.tool_joint_names]
         self._ik_joint_lower_limits = self._joint_lower_limits[self._ik_joint_ids]
         self._ik_joint_upper_limits = self._joint_upper_limits[self._ik_joint_ids]
         self._tool_joint_default_pos = self._psm.data.default_joint_pos[0, self._tool_joint_ids].clone()
         self._joint_pos_des = self._psm.data.default_joint_pos[:, self._ik_joint_ids].clone()
 
         self._psm_body_name_to_idx, self._psm_body_name_to_path = self._build_psm_body_lookup()
-        self._register_tip_contact_sensor()
         self._tip_body_idx = self._resolve_required_body_idx(self.cfg.psm_tip_body_name)
+        self._register_tip_contact_sensor()
         self._tip_local_offset = torch.tensor(self.cfg.psm_tip_local_offset, dtype=torch.float32, device=self.device)
         self._tip_local_axis = torch.tensor(self.cfg.psm_tip_local_axis, dtype=torch.float32, device=self.device)
         self._tip_local_axis = self._tip_local_axis / torch.linalg.vector_norm(self._tip_local_axis).clamp_min(1.0e-9)
 
-        self._ik_controller_cfg = DifferentialIKControllerCfg(
+        ik_controller_cfg = DifferentialIKControllerCfg(
             command_type="position",
             use_relative_mode=False,
             ik_method="dls",
         )
-        self._ik_controller = DifferentialIKController(self._ik_controller_cfg, num_envs=self.num_envs, device=self.device)
-        self._psm_entity_cfg = SceneEntityCfg("psm", joint_names=list(self.cfg.ik_joint_names), body_names=[self.cfg.psm_tip_body_name])
+        self._ik_controller = DifferentialIKController(ik_controller_cfg, num_envs=self.num_envs, device=self.device)
+        self._psm_entity_cfg = SceneEntityCfg(
+            "psm",
+            joint_names=list(self.cfg.ik_joint_names),
+            body_names=[self.cfg.psm_tip_body_name],
+        )
         self._ik_commands = torch.zeros((self.num_envs, self._ik_controller.action_dim), dtype=torch.float32, device=self.device)
         self._ee_goal_pos_w = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
 
-        self._workspace_local_low = self._build_workspace_local_low()
-        self._workspace_local_high = self._build_workspace_local_high()
+        self._workspace_local_low = self._build_workspace_bound(self.cfg.workspace_low_offset)
+        self._workspace_local_high = self._build_workspace_bound(self.cfg.workspace_high_offset)
         self._workspace_low_w = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
         self._workspace_high_w = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
         self._update_workspace_bounds()
 
+    def _init_observation_cache(self) -> None:
         self._obs_state = torch.zeros(
             (self.num_envs, int(self.cfg.observation_space)),
             dtype=torch.float32,
             device=self.device,
         )
 
+    @property
+    def _particle_state(self) -> ParticleTaskState:
+        return self._particle_task_tracker.state
+
     @staticmethod
     def _gf_vec3_to_tensor(vec: Gf.Vec3f, device: torch.device | str) -> torch.Tensor:
         return torch.tensor((float(vec[0]), float(vec[1]), float(vec[2])), dtype=torch.float32, device=device)
 
-    def _build_workspace_local_low(self) -> torch.Tensor:
+    def _build_workspace_bound(self, offset: tuple[float, float, float]) -> torch.Tensor:
         lift = torch.tensor((0.0, 0.0, float(self.cfg.table_height_offset)), dtype=torch.float32, device=self.device)
         spawn_pos_tissue = self._gf_vec3_to_tensor(self.cfg.spawn_pos_tissue, self.device)
-        workspace_low_offset = torch.tensor(self.cfg.workspace_low_offset, dtype=torch.float32, device=self.device)
-        return spawn_pos_tissue + lift + workspace_low_offset
-
-    def _build_workspace_local_high(self) -> torch.Tensor:
-        lift = torch.tensor((0.0, 0.0, float(self.cfg.table_height_offset)), dtype=torch.float32, device=self.device)
-        spawn_pos_tissue = self._gf_vec3_to_tensor(self.cfg.spawn_pos_tissue, self.device)
-        workspace_high_offset = torch.tensor(self.cfg.workspace_high_offset, dtype=torch.float32, device=self.device)
-        return spawn_pos_tissue + lift + workspace_high_offset
+        workspace_offset = torch.tensor(offset, dtype=torch.float32, device=self.device)
+        return spawn_pos_tissue + lift + workspace_offset
 
     def _update_workspace_bounds(self) -> None:
         self._workspace_low_w[:] = self.scene.env_origins + self._workspace_local_low.unsqueeze(0)
         self._workspace_high_w[:] = self.scene.env_origins + self._workspace_local_high.unsqueeze(0)
+
+    def _set_task_state_dirty(self, apply_suction: bool) -> None:
+        self._task_state_dirty = True
+        self._task_state_apply_suction = apply_suction
+        self._reward_cache_dirty = True
+        self._done_cache_dirty = True
+        self._observation_pending = True
 
     def _resolve_ik_handles(self) -> None:
         self._psm_entity_cfg.resolve(self.scene)
@@ -416,10 +418,16 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
 
         root_pose_w = self._psm.data.root_state_w[:, 0:7]
         ee_pos_b, ee_quat_b = subtract_frame_transforms(
-            root_pose_w[:, 0:3], root_pose_w[:, 3:7], tip_pos_w, tip_quat_w
+            root_pose_w[:, 0:3],
+            root_pose_w[:, 3:7],
+            tip_pos_w,
+            tip_quat_w,
         )
         ee_goal_pos_b, _ = subtract_frame_transforms(
-            root_pose_w[:, 0:3], root_pose_w[:, 3:7], self._ee_goal_pos_w, tip_quat_w
+            root_pose_w[:, 0:3],
+            root_pose_w[:, 3:7],
+            self._ee_goal_pos_w,
+            tip_quat_w,
         )
 
         self._ik_commands[:] = ee_goal_pos_b
@@ -430,8 +438,7 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         self._joint_pos_des[:] = self._ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
         self._joint_pos_des[:] = torch.clamp(self._joint_pos_des, self._ik_joint_lower_limits, self._ik_joint_upper_limits)
 
-        self._task_state_dirty = True
-        self._task_state_apply_suction = True
+        self._set_task_state_dirty(apply_suction=True)
 
     def _apply_action(self):
         tool_targets = self._tool_joint_default_pos.unsqueeze(0).expand(self.num_envs, -1)
@@ -440,7 +447,6 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
 
     def _register_tip_contact_sensor(self) -> None:
         tip_body_path = self._psm_body_name_to_path.get(self.cfg.psm_tip_body_name)
-
         tip_contact_cfg = ContactSensorCfg(
             prim_path=tip_body_path,
             update_period=0.0,
@@ -522,90 +528,25 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             return
 
         tip_pos_w, tip_dir_w = self._compute_tip_pose_and_direction_w()
-
+        suction_stats = None
         if self._task_state_apply_suction:
             suction_stats = self._suction_controller.step(
-                step_count=self._step_count.detach().cpu().numpy(),
-                num_envs=self.num_envs,
                 psm=self._psm,
                 liquid=self.liquid,
                 glass2=self._glass2,
                 env_origins=self.scene.env_origins,
             )
-            self._absorbed_delta[:] = torch.from_numpy(suction_stats["absorbed_delta"]).to(self.device)
-            self._absorbed_count += self._absorbed_delta
-            alpha = float(self.cfg.absorbed_delta_ema_alpha)
-            self._absorbed_delta_ema.mul_(1.0 - alpha).add_(alpha * self._absorbed_delta)
 
-        self._update_particle_task_state(tip_pos_w=tip_pos_w, tip_dir_w=tip_dir_w)
-        self._task_state_apply_suction = False
+        self._particle_task_tracker.refresh(
+            liquid=self.liquid,
+            tip_pos_w=tip_pos_w,
+            tip_dir_w=tip_dir_w,
+            env_origins=self.scene.env_origins,
+            step_count=self._step_count,
+            suction_stats=suction_stats,
+        )
         self._task_state_dirty = False
-
-    def _update_particle_task_state(self, tip_pos_w: torch.Tensor, tip_dir_w: torch.Tensor) -> None:
-        tip_pos_local = tip_pos_w - self.scene.env_origins
-        prev_centroid = self._blood_centroid.clone()
-        prev_distance = self._blood_centroid_distance.clone()
-        self._prev_blood_centroid.copy_(prev_centroid)
-        self._prev_blood_centroid_distance.copy_(prev_distance)
-
-        suction_radius = float(self.cfg.suction_cone_range)
-        inlet_depth = float(self.cfg.inlet_depth)
-        inlet_radius = float(self.cfg.inlet_radius)
-        cos_theta = float(np.cos(np.deg2rad(float(self.cfg.suction_cone_half_angle_deg))))
-        epsilon = max(float(getattr(self.cfg, "suction_epsilon", 1.0e-6)), 1.0e-12)
-
-        for env_idx in range(self.num_envs):
-            particles_pos, _ = self.liquid.get_particles_position(env_idx)
-            if len(particles_pos) == 0:
-                if int(self._step_count[env_idx].item()) <= 0:
-                    self._blood_centroid[env_idx] = tip_pos_w[env_idx]
-                    self._prev_blood_centroid[env_idx] = tip_pos_w[env_idx]
-                    self._blood_centroid_distance[env_idx] = 0.0
-                    self._prev_blood_centroid_distance[env_idx] = 0.0
-                else:
-                    self._blood_centroid[env_idx] = prev_centroid[env_idx]
-                    self._blood_centroid_distance[env_idx] = prev_distance[env_idx]
-                self._valid_in_cone_ratio[env_idx] = 0.0
-                self._valid_in_inlet_ratio[env_idx] = 0.0
-                continue
-
-            particles_pos_tensor = torch.as_tensor(particles_pos, dtype=torch.float32, device=self.device)
-            valid_mask = particles_pos_tensor[:, self.cfg.height_axis] >= float(self.cfg.height_limit)
-            if not torch.any(valid_mask):
-                if int(self._step_count[env_idx].item()) <= 0:
-                    self._blood_centroid[env_idx] = tip_pos_w[env_idx]
-                    self._prev_blood_centroid[env_idx] = tip_pos_w[env_idx]
-                    self._blood_centroid_distance[env_idx] = 0.0
-                    self._prev_blood_centroid_distance[env_idx] = 0.0
-                else:
-                    self._blood_centroid[env_idx] = prev_centroid[env_idx]
-                    self._blood_centroid_distance[env_idx] = prev_distance[env_idx]
-                self._valid_in_cone_ratio[env_idx] = 0.0
-                self._valid_in_inlet_ratio[env_idx] = 0.0
-                continue
-
-            valid_positions = particles_pos_tensor[valid_mask]
-            centroid_local = valid_positions.mean(dim=0)
-            centroid_w = centroid_local + self.scene.env_origins[env_idx]
-            relative_positions = valid_positions - tip_pos_local[env_idx]
-            distances = torch.linalg.vector_norm(relative_positions, dim=1)
-            axial_depth = torch.sum(relative_positions * tip_dir_w[env_idx], dim=1)
-            radial_offset = relative_positions - axial_depth.unsqueeze(1) * tip_dir_w[env_idx]
-            radial_distance = torch.linalg.vector_norm(radial_offset, dim=1)
-            cos_alpha = axial_depth / distances.clamp_min(epsilon)
-            in_cone = (distances < suction_radius) & (cos_alpha >= cos_theta)
-            in_inlet = (axial_depth > 0.0) & (axial_depth < inlet_depth) & (radial_distance < inlet_radius)
-            valid_count = max(valid_positions.shape[0], 1)
-            current_distance = torch.linalg.vector_norm(centroid_local - tip_pos_local[env_idx])
-
-            self._blood_centroid[env_idx] = centroid_w
-            self._blood_centroid_distance[env_idx] = current_distance
-            self._valid_in_cone_ratio[env_idx] = in_cone.to(dtype=torch.float32).sum() / float(valid_count)
-            self._valid_in_inlet_ratio[env_idx] = in_inlet.to(dtype=torch.float32).sum() / float(valid_count)
-
-            if int(self._step_count[env_idx].item()) <= 0:
-                self._prev_blood_centroid[env_idx] = centroid_w
-                self._prev_blood_centroid_distance[env_idx] = current_distance
+        self._task_state_apply_suction = False
 
     def _normalize_workspace_positions(self, pos_w: torch.Tensor) -> torch.Tensor:
         workspace_range = (self._workspace_high_w - self._workspace_low_w).clamp_min(1.0e-6)
@@ -624,24 +565,24 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         tip_pos = tip_pos_w[0].detach().cpu().tolist()
         print(f"[EE] env=0 step={step} tip_pos_w=({tip_pos[0]:.4f}, {tip_pos[1]:.4f}, {tip_pos[2]:.4f})")
 
-    def _update_low_dim_observation(self) -> None:
-        self._refresh_post_step_task_state()
-
-        tip_pos_w, tip_dir_w = self._compute_tip_pose_and_direction_w()
-        reset_goal_mask = self._step_count <= 0
-        self._ee_goal_pos_w[reset_goal_mask] = tip_pos_w[reset_goal_mask]
-        self._maybe_print_tip_position(tip_pos_w)
+    def _build_observation_from_task_state(
+        self,
+        tip_pos_w: torch.Tensor,
+        tip_dir_w: torch.Tensor,
+        contact_force: torch.Tensor,
+    ) -> torch.Tensor:
+        task_state = self._particle_state
         tip_pos_normalized = self._normalize_workspace_positions(tip_pos_w)
         workspace_range = (self._workspace_high_w - self._workspace_low_w).clamp_min(1.0e-6)
         goal_error_normalized = torch.clamp(2.0 * (self._ee_goal_pos_w - tip_pos_w) / workspace_range, -1.0, 1.0)
-        blood_centroid_rel_normalized = torch.clamp((self._blood_centroid - tip_pos_w) / workspace_range, -1.0, 1.0)
+        blood_centroid_rel_normalized = torch.clamp((task_state.blood_centroid - tip_pos_w) / workspace_range, -1.0, 1.0)
 
-        absorbed_ratio = torch.clamp(self._absorbed_count / self._expected_particle_count, min=0.0, max=1.0).unsqueeze(1)
-        absorbed_delta_ema = torch.clamp(self._absorbed_delta_ema, min=0.0, max=1.0).unsqueeze(1)
-        valid_in_cone_ratio = torch.clamp(self._valid_in_cone_ratio, min=0.0, max=1.0).unsqueeze(1)
-        valid_in_inlet_ratio = torch.clamp(self._valid_in_inlet_ratio, min=0.0, max=1.0).unsqueeze(1)
+        absorbed_ratio = torch.clamp(task_state.absorbed_count / self._expected_particle_count, min=0.0, max=1.0).unsqueeze(1)
+        absorbed_delta_ema = torch.clamp(task_state.absorbed_delta_ema, min=0.0, max=1.0).unsqueeze(1)
+        valid_in_cone_ratio = torch.clamp(task_state.valid_in_cone_ratio, min=0.0, max=1.0).unsqueeze(1)
+        valid_in_inlet_ratio = torch.clamp(task_state.valid_in_inlet_ratio, min=0.0, max=1.0).unsqueeze(1)
         contact_ratio = torch.clamp(
-            self._get_tip_contact_force() / max(float(self.cfg.tip_contact_force_threshold), 1.0e-6),
+            contact_force / max(float(self.cfg.tip_contact_force_threshold), 1.0e-6),
             min=0.0,
             max=1.0,
         ).unsqueeze(1)
@@ -651,7 +592,7 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             max=1.0,
         ).unsqueeze(1)
 
-        self._obs_state[:] = torch.cat(
+        return torch.cat(
             (
                 tip_pos_normalized,
                 goal_error_normalized,
@@ -667,9 +608,20 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             dim=1,
         )
 
-    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def _update_low_dim_observation(self) -> None:
         self._refresh_post_step_task_state()
 
+        tip_pos_w, tip_dir_w = self._compute_tip_pose_and_direction_w()
+        reset_goal_mask = self._step_count <= 0
+        self._ee_goal_pos_w[reset_goal_mask] = tip_pos_w[reset_goal_mask]
+        self._maybe_print_tip_position(tip_pos_w)
+        contact_force = self._get_tip_contact_force()
+        self._obs_state[:] = self._build_observation_from_task_state(tip_pos_w, tip_dir_w, contact_force)
+
+    def _compute_termination_flags(
+        self, contact_force: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        task_state = self._particle_state
         ik_joint_pos = self._psm.data.joint_pos[:, self._ik_joint_ids]
         tolerance = float(self.cfg.joint_limit_termination_tolerance)
         joint_limit_reached = torch.any(
@@ -678,42 +630,59 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             dim=1,
         )
 
-        contact_force = self._get_tip_contact_force()
         severe_contact = contact_force > float(self.cfg.severe_contact_force_threshold)
-        self._severe_contact_counter[:] = torch.where(
+        next_counter = torch.where(
             severe_contact,
             self._severe_contact_counter + 1,
             torch.zeros_like(self._severe_contact_counter),
         )
-        severe_collision = self._severe_contact_counter >= int(self.cfg.severe_contact_patience)
-        success = self._absorbed_count >= self._success_threshold
+        severe_collision = next_counter >= int(self.cfg.severe_contact_patience)
+        success = task_state.absorbed_count >= self._success_threshold
 
         terminated = success | joint_limit_reached | severe_collision
         truncated = self.episode_length_buf >= self.max_episode_length - 1
+        flags = {
+            "success": success,
+            "joint_limit": joint_limit_reached,
+            "severe_collision": severe_collision,
+            "time_out": truncated,
+        }
+        return terminated, truncated, next_counter, flags
 
-        self._terminated[:] = terminated
-        self._episode_success[:] = success
-        self._episode_joint_limit[:] = joint_limit_reached
-        self._episode_severe_collision[:] = severe_collision
-        self._episode_time_out[:] = truncated
-        return terminated, truncated
+    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self._done_cache_dirty:
+            return self._terminated_cache.clone(), self._truncated_cache.clone()
 
-    def _get_rewards(self) -> torch.Tensor:
         self._refresh_post_step_task_state()
 
-        absorb_reward = self.cfg.reward_absorb_weight * self._absorbed_delta
+        contact_force = self._get_tip_contact_force()
+        terminated, truncated, next_counter, flags = self._compute_termination_flags(contact_force)
+        self._severe_contact_counter[:] = next_counter
+        self._episode_success[:] = flags["success"]
+        self._episode_joint_limit[:] = flags["joint_limit"]
+        self._episode_severe_collision[:] = flags["severe_collision"]
+        self._episode_time_out[:] = flags["time_out"]
+        self._terminated_cache[:] = terminated
+        self._truncated_cache[:] = truncated
+        self._done_cache_dirty = False
+        return terminated.clone(), truncated.clone()
+
+    def _compute_reward_terms(self, reward_inputs: ParticleRewardInputs) -> dict[str, torch.Tensor]:
+        task_state = self._particle_state
+
+        absorb_reward = self.cfg.reward_absorb_weight * task_state.absorbed_delta
         centroid_progress = torch.clamp(
-            self._prev_blood_centroid_distance - self._blood_centroid_distance,
+            task_state.prev_blood_centroid_distance - task_state.blood_centroid_distance,
             min=-float(self.cfg.centroid_progress_clip),
             max=float(self.cfg.centroid_progress_clip),
         )
         centroid_progress_reward = self.cfg.centroid_progress_weight * centroid_progress
-        cone_coverage_reward = self.cfg.reward_cone_coverage_weight * self._valid_in_cone_ratio
-        inlet_coverage_reward = self.cfg.reward_inlet_coverage_weight * self._valid_in_inlet_ratio
-        action_penalty = self.cfg.reward_action_weight * torch.sum(self._raw_actions**2, dim=1)
-        contact_force = self._get_tip_contact_force()
+        cone_coverage_reward = self.cfg.reward_cone_coverage_weight * task_state.valid_in_cone_ratio
+        inlet_coverage_reward = self.cfg.reward_inlet_coverage_weight * task_state.valid_in_inlet_ratio
+        action_penalty = self.cfg.reward_action_weight * torch.sum(reward_inputs.raw_actions**2, dim=1)
         collision_force_penalty = self.cfg.reward_collision_force_weight * torch.clamp(
-            contact_force - float(self.cfg.tip_contact_force_threshold), min=0.0
+            reward_inputs.contact_force - float(self.cfg.tip_contact_force_threshold),
+            min=0.0,
         )
         time_penalty = torch.full(
             (self.num_envs,),
@@ -721,9 +690,8 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             dtype=torch.float32,
             device=self.device,
         )
-        task_complete = self.cfg.reward_task_complete * (self._absorbed_count >= self._success_threshold).float()
-
-        reward = (
+        task_complete = self.cfg.reward_task_complete * (task_state.absorbed_count >= self._success_threshold).float()
+        total_reward = (
             task_complete
             + absorb_reward
             + centroid_progress_reward
@@ -734,26 +702,84 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             - time_penalty
         ).float()
 
-        self._episode_reward_sums["absorb_reward"] += absorb_reward
-        self._episode_reward_sums["centroid_progress_reward"] += centroid_progress_reward
-        self._episode_reward_sums["cone_coverage_reward"] += cone_coverage_reward
-        self._episode_reward_sums["inlet_coverage_reward"] += inlet_coverage_reward
-        self._episode_reward_sums["action_penalty"] -= action_penalty
-        self._episode_reward_sums["collision_force_penalty"] -= collision_force_penalty
-        self._episode_reward_sums["time_penalty"] -= time_penalty
-        self._episode_reward_sums["task_complete"] += task_complete
-
-        self.extras["log"] = {
-            "Metrics/absorbed_count": self._absorbed_count.mean(),
-            "Metrics/absorbed_delta": self._absorbed_delta.mean(),
-            "Metrics/blood_centroid_distance": self._blood_centroid_distance.mean(),
-            "Metrics/valid_in_cone_ratio": self._valid_in_cone_ratio.mean(),
-            "Metrics/valid_in_inlet_ratio": self._valid_in_inlet_ratio.mean(),
-            "Metrics/absorbed_delta_ema": self._absorbed_delta_ema.mean(),
-            "Metrics/success_rate": (self._absorbed_count >= self._success_threshold).float().mean(),
+        return {
+            "absorb_reward": absorb_reward,
+            "centroid_progress_reward": centroid_progress_reward,
+            "cone_coverage_reward": cone_coverage_reward,
+            "inlet_coverage_reward": inlet_coverage_reward,
+            "action_penalty": action_penalty,
+            "collision_force_penalty": collision_force_penalty,
+            "time_penalty": time_penalty,
+            "task_complete": task_complete,
+            "total_reward": total_reward,
         }
 
-        return reward
+    def _get_rewards(self) -> torch.Tensor:
+        if not self._reward_cache_dirty:
+            return self._reward_cache.clone()
+
+        self._refresh_post_step_task_state()
+
+        reward_terms = self._compute_reward_terms(
+            ParticleRewardInputs(
+                raw_actions=self._raw_actions,
+                contact_force=self._get_tip_contact_force(),
+            )
+        )
+        task_state = self._particle_state
+
+        self._episode_reward_sums["absorb_reward"] += reward_terms["absorb_reward"]
+        self._episode_reward_sums["centroid_progress_reward"] += reward_terms["centroid_progress_reward"]
+        self._episode_reward_sums["cone_coverage_reward"] += reward_terms["cone_coverage_reward"]
+        self._episode_reward_sums["inlet_coverage_reward"] += reward_terms["inlet_coverage_reward"]
+        self._episode_reward_sums["action_penalty"] -= reward_terms["action_penalty"]
+        self._episode_reward_sums["collision_force_penalty"] -= reward_terms["collision_force_penalty"]
+        self._episode_reward_sums["time_penalty"] -= reward_terms["time_penalty"]
+        self._episode_reward_sums["task_complete"] += reward_terms["task_complete"]
+
+        self.extras["log"] = {
+            "Metrics/absorbed_count": task_state.absorbed_count.mean(),
+            "Metrics/absorbed_delta": task_state.absorbed_delta.mean(),
+            "Metrics/blood_centroid_distance": task_state.blood_centroid_distance.mean(),
+            "Metrics/valid_in_cone_ratio": task_state.valid_in_cone_ratio.mean(),
+            "Metrics/valid_in_inlet_ratio": task_state.valid_in_inlet_ratio.mean(),
+            "Metrics/absorbed_delta_ema": task_state.absorbed_delta_ema.mean(),
+            "Metrics/success_rate": (task_state.absorbed_count >= self._success_threshold).float().mean(),
+        }
+
+        self._reward_cache[:] = reward_terms["total_reward"]
+        self._reward_cache_dirty = False
+        return self._reward_cache.clone()
+
+    def _flush_episode_logs(self, finished_env_ids: torch.Tensor) -> None:
+        if finished_env_ids.numel() <= 0:
+            return
+
+        if "log" not in self.extras:
+            self.extras["log"] = {}
+
+        actual_steps = self._step_count[finished_env_ids].float().clamp_min(1.0)
+        reward_logs = {}
+        for key, values in self._episode_reward_sums.items():
+            reward_logs[f"Episode_Reward/{key}"] = (values[finished_env_ids] / actual_steps).mean()
+
+        success_mask = self._episode_success[finished_env_ids]
+        joint_limit_mask = (~success_mask) & self._episode_joint_limit[finished_env_ids]
+        severe_collision_mask = (~success_mask) & (~joint_limit_mask) & self._episode_severe_collision[finished_env_ids]
+        time_out_mask = (
+            (~success_mask)
+            & (~joint_limit_mask)
+            & (~severe_collision_mask)
+            & self._episode_time_out[finished_env_ids]
+        )
+        termination_logs = {
+            "Episode_Termination/success": success_mask.float().mean(),
+            "Episode_Termination/joint_limit": joint_limit_mask.float().mean(),
+            "Episode_Termination/severe_collision": severe_collision_mask.float().mean(),
+            "Episode_Termination/time_out": time_out_mask.float().mean(),
+        }
+        self.extras["log"].update(reward_logs)
+        self.extras["log"].update(termination_logs)
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         super()._reset_idx(env_ids)
@@ -766,42 +792,13 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         self._ik_controller.reset(env_ids=env_ids)
         self._update_workspace_bounds()
 
-        ids = env_ids.tolist()
         finished_mask = (
             self._episode_success[env_ids]
             | self._episode_joint_limit[env_ids]
             | self._episode_severe_collision[env_ids]
             | self._episode_time_out[env_ids]
         )
-        finished_env_ids = env_ids[finished_mask]
-
-        if finished_env_ids.numel() > 0:
-            if "log" not in self.extras:
-                self.extras["log"] = dict()
-
-            reward_logs = {}
-            actual_steps = self._step_count[finished_env_ids].float().clamp_min(1.0)
-            for key, values in self._episode_reward_sums.items():
-                reward_logs[f"Episode_Reward/{key}"] = (values[finished_env_ids] / actual_steps).mean()
-
-            success_mask = self._episode_success[finished_env_ids]
-            joint_limit_mask = (~success_mask) & self._episode_joint_limit[finished_env_ids]
-            severe_collision_mask = (~success_mask) & (~joint_limit_mask) & self._episode_severe_collision[finished_env_ids]
-            time_out_mask = (
-                (~success_mask)
-                & (~joint_limit_mask)
-                & (~severe_collision_mask)
-                & self._episode_time_out[finished_env_ids]
-            )
-
-            termination_logs = {
-                "Episode_Termination/success": success_mask.float().mean(),
-                "Episode_Termination/joint_limit": joint_limit_mask.float().mean(),
-                "Episode_Termination/severe_collision": severe_collision_mask.float().mean(),
-                "Episode_Termination/time_out": time_out_mask.float().mean(),
-            }
-            self.extras["log"].update(reward_logs)
-            self.extras["log"].update(termination_logs)
+        self._flush_episode_logs(env_ids[finished_mask])
 
         joint_pos = self._psm.data.default_joint_pos[env_ids]
         joint_vel = torch.zeros_like(joint_pos)
@@ -809,25 +806,12 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         self._psm.set_joint_position_target(joint_pos, env_ids=env_ids)
         self._joint_pos_des[env_ids] = joint_pos[:, self._ik_joint_ids]
 
-        if self._initial_particles_pos is not None:
-            for env_id in ids:
-                self.liquid.set_particles_position(
-                    self._initial_particles_pos.copy(),
-                    self._initial_particles_vel.copy(),
-                    int(env_id),
-                )
+        if self.liquid.has_initial_state:
+            self.liquid.reset_particles(env_ids.tolist())
 
-        self._suction_controller.reset(ids)
+        self._suction_controller.reset(env_ids.tolist())
         self._step_count[env_ids] = 0
-        self._absorbed_count[env_ids] = 0.0
-        self._absorbed_delta[env_ids] = 0.0
-        self._absorbed_delta_ema[env_ids] = 0.0
-        self._blood_centroid_distance[env_ids] = 0.0
-        self._prev_blood_centroid_distance[env_ids] = 0.0
-        self._valid_in_cone_ratio[env_ids] = 0.0
-        self._valid_in_inlet_ratio[env_ids] = 0.0
         self._severe_contact_counter[env_ids] = 0
-        self._terminated[env_ids] = False
         for values in self._episode_reward_sums.values():
             values[env_ids] = 0.0
         self._episode_success[env_ids] = False
@@ -840,21 +824,19 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
 
         tip_pos_w, _ = self._compute_tip_pose_and_direction_w()
         self._ee_goal_pos_w[env_ids] = tip_pos_w[env_ids]
-        self._blood_centroid[env_ids] = tip_pos_w[env_ids]
-        self._prev_blood_centroid[env_ids] = tip_pos_w[env_ids]
-        self._task_state_dirty = True
-        self._task_state_apply_suction = False
+        self._particle_task_tracker.reset(env_ids, tip_pos_w)
+        self._set_task_state_dirty(apply_suction=False)
 
     def _get_observations(self) -> dict:
-        self._update_low_dim_observation()
+        if self._observation_pending:
+            self._update_low_dim_observation()
 
-        if not self._particles_initialized:
-            pos, vel = self.liquid.get_particles_position(0)
-            if len(pos) > 0:
-                self._initial_particles_pos = pos.copy()
-                self._initial_particles_vel = vel.copy()
-                self._particles_initialized = True
+            if not self.liquid.has_initial_state:
+                particles_pos, _ = self.liquid.read_particles(0)
+                if len(particles_pos) > 0:
+                    self.liquid.capture_initial_state(env_id=0)
 
-        self._step_count += 1
+            self._step_count += 1
+            self._observation_pending = False
 
         return {"policy": self._obs_state.clone()}
