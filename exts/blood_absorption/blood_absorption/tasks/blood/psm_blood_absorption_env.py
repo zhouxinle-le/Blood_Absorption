@@ -198,24 +198,22 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     outflow_speed = 0.02
     max_particle_speed = 0.4
 
-    reward_absorb_weight = 2.0
+    reward_absorb_weight = 60
     centroid_progress_weight = 100.0
     centroid_progress_clip = 0.02
     reward_cone_coverage_weight = 0.5
     reward_inlet_coverage_weight = 1.0
     reward_action_weight = 0.02
     reward_time_penalty = 0.01
-    reward_task_complete = 200.0
+    reward_task_complete = 40.0
     reward_collision_force_weight = 0.05
+    collision_force_penalty_max_force = 10.0
     absorbed_delta_ema_alpha = 0.2
     severe_contact_force_threshold = 2.0
     severe_contact_patience = 2
 
     success_absorption_ratio = 0.97
     joint_limit_termination_tolerance = 1e-3
-
-    debug_print_ee_pos = False
-    debug_print_ee_pos_interval = 1
 
 
 class PsmBloodAbsorptionEnv(DirectRLEnv):
@@ -260,6 +258,8 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         self._step_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._severe_contact_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._episode_reward_sums = self._build_episode_reward_sums()
+        self._episode_raw_contact_force_sum = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self._episode_raw_contact_force_max = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self._episode_success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._episode_joint_limit = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._episode_severe_collision = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -658,8 +658,10 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
 
     def _compute_reward_terms(self, reward_inputs: ParticleRewardInputs) -> dict[str, torch.Tensor]:
         task_state = self._particle_state
+        
+        absorbed_frac_delta = task_state.absorbed_delta / self._success_threshold
+        absorb_reward = self.cfg.reward_absorb_weight * absorbed_frac_delta
 
-        absorb_reward = self.cfg.reward_absorb_weight * task_state.absorbed_delta
         centroid_progress = torch.clamp(
             task_state.prev_blood_centroid_distance - task_state.blood_centroid_distance,
             min=-float(self.cfg.centroid_progress_clip),
@@ -669,10 +671,14 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         cone_coverage_reward = self.cfg.reward_cone_coverage_weight * task_state.valid_in_cone_ratio
         inlet_coverage_reward = self.cfg.reward_inlet_coverage_weight * task_state.valid_in_inlet_ratio
         action_penalty = self.cfg.reward_action_weight * torch.sum(reward_inputs.raw_actions**2, dim=1)
+        
+        max_penalty_force = max(float(self.cfg.collision_force_penalty_max_force),float(self.cfg.tip_contact_force_threshold),)
+        clipped_contact_force = torch.clamp(reward_inputs.contact_force, max=max_penalty_force)
         collision_force_penalty = self.cfg.reward_collision_force_weight * torch.clamp(
-            reward_inputs.contact_force - float(self.cfg.tip_contact_force_threshold),
+            clipped_contact_force - float(self.cfg.tip_contact_force_threshold),
             min=0.0,
         )
+
         time_penalty = torch.full(
             (self.num_envs,),
             float(self.cfg.reward_time_penalty),
@@ -709,10 +715,11 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
 
         self._refresh_post_step_task_state()
 
+        raw_contact_force = self._get_tip_contact_force()
         reward_terms = self._compute_reward_terms(
             ParticleRewardInputs(
                 raw_actions=self._raw_actions,
-                contact_force=self._get_tip_contact_force(),
+                contact_force=raw_contact_force,
             )
         )
         task_state = self._particle_state
@@ -725,6 +732,8 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         self._episode_reward_sums["collision_force_penalty"] -= reward_terms["collision_force_penalty"]
         self._episode_reward_sums["time_penalty"] -= reward_terms["time_penalty"]
         self._episode_reward_sums["task_complete"] += reward_terms["task_complete"]
+        self._episode_raw_contact_force_sum += raw_contact_force
+        self._episode_raw_contact_force_max = torch.maximum(self._episode_raw_contact_force_max, raw_contact_force)
 
         self.extras["log"] = {
             "Metrics/absorbed_count": task_state.absorbed_count.mean(),
@@ -733,6 +742,8 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             "Metrics/valid_in_cone_ratio": task_state.valid_in_cone_ratio.mean(),
             "Metrics/valid_in_inlet_ratio": task_state.valid_in_inlet_ratio.mean(),
             "Metrics/absorbed_delta_ema": task_state.absorbed_delta_ema.mean(),
+            "Metrics/raw_contact_force_mean": raw_contact_force.mean(),
+            "Metrics/raw_contact_force_max": raw_contact_force.max(),
             "Metrics/success_rate": (task_state.absorbed_count >= self._success_threshold).float().mean(),
         }
 
@@ -751,6 +762,12 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         reward_logs = {}
         for key, values in self._episode_reward_sums.items():
             reward_logs[f"Episode_Reward/{key}"] = (values[finished_env_ids] / actual_steps).mean()
+        contact_force_logs = {
+            "Episode_Contact_Force/raw_mean": (
+                self._episode_raw_contact_force_sum[finished_env_ids] / actual_steps
+            ).mean(),
+            "Episode_Contact_Force/raw_max": self._episode_raw_contact_force_max[finished_env_ids].mean(),
+        }
 
         success_mask = self._episode_success[finished_env_ids]
         joint_limit_mask = (~success_mask) & self._episode_joint_limit[finished_env_ids]
@@ -772,6 +789,7 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             "Episode_Termination/time_out": time_out_mask.float().mean(),
         }
         self.extras["log"].update(reward_logs)
+        self.extras["log"].update(contact_force_logs)
         self.extras["log"].update(termination_logs)
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -807,6 +825,8 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         self._severe_contact_counter[env_ids] = 0
         for values in self._episode_reward_sums.values():
             values[env_ids] = 0.0
+        self._episode_raw_contact_force_sum[env_ids] = 0.0
+        self._episode_raw_contact_force_max[env_ids] = 0.0
         self._episode_success[env_ids] = False
         self._episode_joint_limit[env_ids] = False
         self._episode_severe_collision[env_ids] = False
