@@ -200,8 +200,8 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     max_particle_speed = 0.4
 
     reward_absorb_weight = 60
-    centroid_progress_weight = 100.0
-    centroid_progress_clip = 0.02
+    centroid_progress_weight = 20.0
+    centroid_progress_clip = 0.1
     reward_cone_coverage_weight = 0.5
     reward_inlet_coverage_weight = 1.0
     reward_action_weight = 0.02
