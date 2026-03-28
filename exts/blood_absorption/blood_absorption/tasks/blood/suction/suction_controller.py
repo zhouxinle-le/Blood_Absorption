@@ -25,7 +25,7 @@ class SuctionControllerNoTimer:
         liquid,
         glass2,
         env_origins_np: np.ndarray,
-        apply_suction: bool,
+        apply_suction_mask: np.ndarray,
     ) -> dict[str, np.ndarray]:
         num_envs = self._num_envs
 
@@ -47,6 +47,7 @@ class SuctionControllerNoTimer:
         particle_mass = max(float(self.cfg.liquidCfg.particle_mass), epsilon)
 
         for env_idx in range(num_envs):
+            apply_suction_env = apply_suction_mask[env_idx]
             tip_pos = tip_pos_local_np[env_idx]
             tip_dir = tip_dir_w_np[env_idx]
             
@@ -84,7 +85,7 @@ class SuctionControllerNoTimer:
                 inlet_radius=float(self.cfg.inlet_radius),
                 epsilon=epsilon,
             )
-            if apply_suction:
+            if apply_suction_env:
                 in_cone = self._apply_manual_suction(
                     particles_vel=particles_vel,
                     relative_positions=relative_positions,
@@ -106,7 +107,7 @@ class SuctionControllerNoTimer:
             valid_in_cone_ratio[env_idx] = in_cone_sum / float(valid_count)
             valid_in_inlet_ratio[env_idx] = in_inlet_sum / float(valid_count)
 
-            if apply_suction and remove_mask.any():
+            if apply_suction_env and remove_mask.any():
                 absorbed_delta[env_idx] = float(
                     self._transfer_particles(
                         env_idx=env_idx,
@@ -118,7 +119,7 @@ class SuctionControllerNoTimer:
                     )
                 )
 
-            if apply_suction:
+            if apply_suction_env:
                 self._limit_particle_speed(particles_vel)
                 liquid.write_particles(env_idx, particles_pos, particles_vel)
 

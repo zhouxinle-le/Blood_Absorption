@@ -198,20 +198,20 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     outflow_speed = 0.02
     max_particle_speed = 0.4
 
-    reward_absorb_weight = 6.0
+    reward_absorb_weight = 2.0
     centroid_progress_weight = 100.0
     centroid_progress_clip = 0.02
-    reward_cone_coverage_weight = 0.4
-    reward_inlet_coverage_weight = 0.8
+    reward_cone_coverage_weight = 0.5
+    reward_inlet_coverage_weight = 1.0
     reward_action_weight = 0.02
-    reward_time_penalty = 0.005
-    reward_task_complete = 10.0
-    reward_collision_force_weight = 0.03
+    reward_time_penalty = 0.01
+    reward_task_complete = 200.0
+    reward_collision_force_weight = 0.05
     absorbed_delta_ema_alpha = 0.2
     severe_contact_force_threshold = 2.0
     severe_contact_patience = 2
 
-    success_absorption_ratio = 0.75
+    success_absorption_ratio = 0.97
     joint_limit_termination_tolerance = 1e-3
 
     debug_print_ee_pos = False
@@ -237,7 +237,6 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
     def _init_scene_runtime_state(self) -> None:
         self._suction_controller = SuctionControllerNoTimer(cfg=self.cfg, num_envs=self.num_envs)
         self._task_state_dirty = True
-        self._task_state_apply_suction = False
         self._reward_cache_dirty = True
         self._done_cache_dirty = True
         self._observation_pending = True
@@ -341,9 +340,8 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         self._workspace_low_w[:] = self.scene.env_origins + self._workspace_local_low.unsqueeze(0)
         self._workspace_high_w[:] = self.scene.env_origins + self._workspace_local_high.unsqueeze(0)
 
-    def _set_task_state_dirty(self, apply_suction: bool) -> None:
+    def _set_task_state_dirty(self) -> None:
         self._task_state_dirty = True
-        self._task_state_apply_suction = apply_suction
         self._reward_cache_dirty = True
         self._done_cache_dirty = True
         self._observation_pending = True
@@ -438,7 +436,7 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         self._joint_pos_des[:] = self._ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
         self._joint_pos_des[:] = torch.clamp(self._joint_pos_des, self._ik_joint_lower_limits, self._ik_joint_upper_limits)
 
-        self._set_task_state_dirty(apply_suction=True)
+        self._set_task_state_dirty()
 
     def _apply_action(self):
         tool_targets = self._tool_joint_default_pos.unsqueeze(0).expand(self.num_envs, -1)
@@ -528,11 +526,11 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             return
 
         tip_pos_w, tip_dir_w = self._compute_tip_pose_and_direction_w()
-        
         # 准备传入底层 NumPy 接口的坐标数组
         env_origins_np = self.scene.env_origins.detach().cpu().numpy()
         tip_pos_local_np = (tip_pos_w - self.scene.env_origins).detach().cpu().numpy()
         tip_dir_w_np = tip_dir_w.detach().cpu().numpy()
+        apply_suction_mask_np = (self._step_count > 0).detach().cpu().numpy()
 
         # 一步运算，拿到吸血结果和当前统计指标
         particle_stats = self._suction_controller.step(
@@ -541,7 +539,7 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             liquid=self.liquid,
             glass2=self._glass2,
             env_origins_np=env_origins_np,
-            apply_suction=self._task_state_apply_suction,
+            apply_suction_mask=apply_suction_mask_np,
         )
 
         # Tracker 纯粹更新 Torch 张量和时序奖励指标
@@ -551,24 +549,11 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             particle_stats=particle_stats,
         )
         self._task_state_dirty = False
-        self._task_state_apply_suction = False
 
     def _normalize_workspace_positions(self, pos_w: torch.Tensor) -> torch.Tensor:
         workspace_range = (self._workspace_high_w - self._workspace_low_w).clamp_min(1.0e-6)
         normalized = 2.0 * (pos_w - self._workspace_low_w) / workspace_range - 1.0
         return torch.clamp(normalized, -1.0, 1.0)
-
-    def _maybe_print_tip_position(self, tip_pos_w: torch.Tensor) -> None:
-        if not bool(getattr(self.cfg, "debug_print_ee_pos", False)) or self.num_envs <= 0:
-            return
-
-        interval = max(int(getattr(self.cfg, "debug_print_ee_pos_interval", 50)), 1)
-        step = int(self._step_count[0].item())
-        if step % interval != 0:
-            return
-
-        tip_pos = tip_pos_w[0].detach().cpu().tolist()
-        print(f"[EE] env=0 step={step} tip_pos_w=({tip_pos[0]:.4f}, {tip_pos[1]:.4f}, {tip_pos[2]:.4f})")
 
     def _build_observation_from_task_state(
         self,
@@ -619,7 +604,6 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         tip_pos_w, tip_dir_w = self._compute_tip_pose_and_direction_w()
         reset_goal_mask = self._step_count <= 0
         self._ee_goal_pos_w[reset_goal_mask] = tip_pos_w[reset_goal_mask]
-        self._maybe_print_tip_position(tip_pos_w)
         contact_force = self._get_tip_contact_force()
         self._obs_state[:] = self._build_observation_from_task_state(tip_pos_w, tip_dir_w, contact_force)
 
@@ -770,7 +754,11 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
 
         success_mask = self._episode_success[finished_env_ids]
         joint_limit_mask = (~success_mask) & self._episode_joint_limit[finished_env_ids]
-        severe_collision_mask = (~success_mask) & (~joint_limit_mask) & self._episode_severe_collision[finished_env_ids]
+        severe_collision_mask = (
+            (~success_mask)
+            & (~joint_limit_mask)
+            & self._episode_severe_collision[finished_env_ids]
+        )
         time_out_mask = (
             (~success_mask)
             & (~joint_limit_mask)
@@ -830,7 +818,7 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         tip_pos_w, _ = self._compute_tip_pose_and_direction_w()
         self._ee_goal_pos_w[env_ids] = tip_pos_w[env_ids]
         self._particle_task_tracker.reset(env_ids, tip_pos_w)
-        self._set_task_state_dirty(apply_suction=False)
+        self._set_task_state_dirty()
 
     def _get_observations(self) -> dict:
         if self._observation_pending:
