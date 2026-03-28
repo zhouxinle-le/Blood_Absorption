@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 
+import math
 import torch
 
 import carb.settings
@@ -206,8 +207,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     reward_action_weight = 0.02
     reward_time_penalty = 0.01
     reward_task_complete = 40.0
-    reward_collision_force_weight = 0.05
-    collision_force_penalty_max_force = 10.0
+    reward_collision_force_weight = 0.20
     absorbed_delta_ema_alpha = 0.2
     severe_contact_force_threshold = 2.0
     severe_contact_patience = 2
@@ -565,14 +565,14 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         tip_pos_normalized = self._normalize_workspace_positions(tip_pos_w)
         workspace_range = (self._workspace_high_w - self._workspace_low_w).clamp_min(1.0e-6)
         goal_error_normalized = torch.clamp(2.0 * (self._ee_goal_pos_w - tip_pos_w) / workspace_range, -1.0, 1.0)
-        blood_centroid_rel_normalized = torch.clamp((task_state.blood_centroid - tip_pos_w) / workspace_range, -1.0, 1.0)
+        blood_centroid_rel_normalized = torch.tanh((task_state.blood_centroid - tip_pos_w) / workspace_range)
 
         absorbed_ratio = torch.clamp(task_state.absorbed_count / self._expected_particle_count, min=0.0, max=1.0).unsqueeze(1)
-        absorbed_delta_ema = torch.clamp(task_state.absorbed_delta_ema, min=0.0, max=1.0).unsqueeze(1)
+        absorbed_delta_ema = torch.tanh(task_state.absorbed_delta_ema).unsqueeze(1)
         valid_in_cone_ratio = torch.clamp(task_state.valid_in_cone_ratio, min=0.0, max=1.0).unsqueeze(1)
         valid_in_inlet_ratio = torch.clamp(task_state.valid_in_inlet_ratio, min=0.0, max=1.0).unsqueeze(1)
         contact_ratio = torch.clamp(
-            contact_force / max(float(self.cfg.tip_contact_force_threshold), 1.0e-6),
+            contact_force / max(float(self.cfg.severe_contact_force_threshold), 1.0e-6),
             min=0.0,
             max=1.0,
         ).unsqueeze(1)
@@ -668,14 +668,15 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             max=float(self.cfg.centroid_progress_clip),
         )
         centroid_progress_reward = self.cfg.centroid_progress_weight * centroid_progress
+
         cone_coverage_reward = self.cfg.reward_cone_coverage_weight * task_state.valid_in_cone_ratio
         inlet_coverage_reward = self.cfg.reward_inlet_coverage_weight * task_state.valid_in_inlet_ratio
         action_penalty = self.cfg.reward_action_weight * torch.sum(reward_inputs.raw_actions**2, dim=1)
-        
-        max_penalty_force = max(float(self.cfg.collision_force_penalty_max_force),float(self.cfg.tip_contact_force_threshold),)
-        clipped_contact_force = torch.clamp(reward_inputs.contact_force, max=max_penalty_force)
+
+        safe_contact_force = torch.log1p(torch.clamp(reward_inputs.contact_force, min=0.0))
+        safe_contact_threshold = math.log1p(float(self.cfg.tip_contact_force_threshold))
         collision_force_penalty = self.cfg.reward_collision_force_weight * torch.clamp(
-            clipped_contact_force - float(self.cfg.tip_contact_force_threshold),
+            safe_contact_force - safe_contact_threshold,
             min=0.0,
         )
 
