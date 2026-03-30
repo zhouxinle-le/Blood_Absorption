@@ -65,12 +65,16 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     spawn_pos_glass2 = Gf.Vec3f(0.0, 0.70, 0.01)
     glass2_particle_height = 0.03
 
-    tissue_setup = UsdFileCfg(
-        usd_path=f"{CURRENT_PATH}/usd_models/whole_sence.usd",
-        scale=(1.0, 1.0, 1.0),
-        rigid_props=RigidBodyPropertiesCfg(
-            disable_gravity=True,
-            kinematic_enabled=True,
+    tissue = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/TissueSetup",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=spawn_pos_tissue, rot=[1, 0, 0, 0]),
+        spawn=UsdFileCfg(
+            usd_path=f"{CURRENT_PATH}/usd_models/whole_sence_no_rigid.usd",
+            scale=(1.0, 1.0, 1.0),
+            rigid_props=RigidBodyPropertiesCfg(
+                disable_gravity=True,
+                kinematic_enabled=True,
+            ),
         ),
     )
 
@@ -374,11 +378,9 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         self.liquid = FluidObject(cfg=self.cfg.liquidCfg, lower_pos=spawn_pos_fluid)
         self.liquid.spawn_fluid_direct()
 
-        self.cfg.tissue_setup.func(
-            prim_path="/World/envs/env_0/TissueSetup",
-            cfg=self.cfg.tissue_setup,
-            translation=spawn_pos_tissue,
-        )
+        self.cfg.tissue.init_state.pos = spawn_pos_tissue
+        self._tissue = RigidObject(self.cfg.tissue)
+        self.scene.rigid_objects["tissue"] = self._tissue
 
         self.cfg.glass2.init_state.pos = spawn_pos_glass2
         self._glass2 = RigidObject(self.cfg.glass2)
