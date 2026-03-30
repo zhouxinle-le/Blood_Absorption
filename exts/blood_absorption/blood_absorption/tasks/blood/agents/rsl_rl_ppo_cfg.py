@@ -25,6 +25,7 @@ class PsmBloodAbsorptionPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         critic_hidden_dims=[256, 128, 64],
         activation="elu",
     )
+    policy.noise_std_type = "log"
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,

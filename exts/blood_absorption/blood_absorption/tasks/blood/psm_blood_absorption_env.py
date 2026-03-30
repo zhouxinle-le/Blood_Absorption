@@ -187,8 +187,8 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     action_scale_lin = 0.003
     workspace_low_offset = (-0.20, -0.20, -0.02)
     workspace_high_offset = (0.20, 0.20, 0.30)
-    tissue_randomization_xy_range = 0.15
-    blood_randomization_xy_range = 0.03
+    tissue_randomization_xy_range = 0.08
+    blood_randomization_xy_range = 0.02
 
     psm_tip_body_name = "suction_tool_end_link"
     psm_tip_local_offset = (0.0, -0.011957148076033514, 0.0)
@@ -372,7 +372,7 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         tissue_root_state = self._tissue.data.default_root_state.clone()[env_ids]
         tissue_root_state[:, :3] += self.scene.env_origins[env_ids]
         tissue_root_state[:, :3] += tissue_offsets
-        self._tissue.write_root_state_to_sim(tissue_root_state, env_ids=env_ids)
+        self._tissue.write_root_pose_to_sim(tissue_root_state[:, :7], env_ids=env_ids)
 
         initial_state = self.liquid.get_initial_state()
         if initial_state is None:
