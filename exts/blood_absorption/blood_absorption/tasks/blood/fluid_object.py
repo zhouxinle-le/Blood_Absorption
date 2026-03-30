@@ -247,6 +247,11 @@ class FluidObject:
         self._initial_particles_vel = velocities.copy()
         return self._initial_particles_pos.copy(), self._initial_particles_vel.copy()
 
+    def get_initial_state(self) -> tuple[np.ndarray, np.ndarray] | None:
+        if not self.has_initial_state:
+            return None
+        return self._initial_particles_pos.copy(), self._initial_particles_vel.copy()
+
     def reset_particles(
         self,
         env_ids: Iterable[int],

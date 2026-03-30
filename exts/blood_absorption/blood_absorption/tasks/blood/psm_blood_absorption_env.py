@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 import math
+import numpy as np
 import torch
 
 import carb.settings
@@ -184,8 +185,10 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
         "suction_tool_end_joint",
     )
     action_scale_lin = 0.003
-    workspace_low_offset = (-0.10, -0.10, -0.02)
-    workspace_high_offset = (0.10, 0.10, 0.30)
+    workspace_low_offset = (-0.20, -0.20, -0.02)
+    workspace_high_offset = (0.20, 0.20, 0.30)
+    tissue_randomization_xy_range = 0.15
+    blood_randomization_xy_range = 0.03
 
     psm_tip_body_name = "suction_tool_end_link"
     psm_tip_local_offset = (0.0, -0.011957148076033514, 0.0)
@@ -343,6 +346,46 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
     def _update_workspace_bounds(self) -> None:
         self._workspace_low_w[:] = self.scene.env_origins + self._workspace_local_low.unsqueeze(0)
         self._workspace_high_w[:] = self.scene.env_origins + self._workspace_local_high.unsqueeze(0)
+
+    def _sample_planar_offsets(self, count: int, max_abs_offset: float) -> torch.Tensor:
+        offsets = torch.zeros((count, 3), dtype=torch.float32, device=self.device)
+        if count <= 0 or max_abs_offset <= 0.0:
+            return offsets
+
+        offsets[:, :2] = torch.empty((count, 2), dtype=torch.float32, device=self.device).uniform_(
+            -max_abs_offset, max_abs_offset
+        )
+        return offsets
+
+    def _randomize_tissue_and_blood(self, env_ids: torch.Tensor) -> None:
+        env_count = int(env_ids.numel())
+        if env_count <= 0:
+            return
+
+        tissue_offsets = self._sample_planar_offsets(
+            env_count, float(self.cfg.tissue_randomization_xy_range)
+        )
+        blood_offsets = self._sample_planar_offsets(
+            env_count, float(self.cfg.blood_randomization_xy_range)
+        )
+
+        tissue_root_state = self._tissue.data.default_root_state.clone()[env_ids]
+        tissue_root_state[:, :3] += self.scene.env_origins[env_ids]
+        tissue_root_state[:, :3] += tissue_offsets
+        self._tissue.write_root_state_to_sim(tissue_root_state, env_ids=env_ids)
+
+        initial_state = self.liquid.get_initial_state()
+        if initial_state is None:
+            return
+
+        initial_particles_pos, initial_particles_vel = initial_state
+        total_offsets_xy = (tissue_offsets[:, :2] + blood_offsets[:, :2]).detach().cpu().numpy()
+        env_id_list = env_ids.detach().cpu().tolist()
+        for index, env_id in enumerate(env_id_list):
+            particles_pos = np.array(initial_particles_pos, copy=True)
+            particles_vel = np.array(initial_particles_vel, copy=True)
+            particles_pos[:, :2] += total_offsets_xy[index]
+            self.liquid.set_particles_position(particles_pos, particles_vel, int(env_id))
 
     def _set_task_state_dirty(self) -> None:
         self._task_state_dirty = True
@@ -814,14 +857,18 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         )
         self._flush_episode_logs(env_ids[finished_mask])
 
+        if not self.liquid.has_initial_state:
+            particles_pos, _ = self.liquid.read_particles(0)
+            if len(particles_pos) > 0:
+                self.liquid.capture_initial_state(env_id=0)
+
         joint_pos = self._psm.data.default_joint_pos[env_ids]
         joint_vel = torch.zeros_like(joint_pos)
         self._psm.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
         self._psm.set_joint_position_target(joint_pos, env_ids=env_ids)
         self._joint_pos_des[env_ids] = joint_pos[:, self._ik_joint_ids]
 
-        if self.liquid.has_initial_state:
-            self.liquid.reset_particles(env_ids.tolist())
+        self._randomize_tissue_and_blood(env_ids)
 
         self._suction_controller.reset(env_ids.tolist())
         self._step_count[env_ids] = 0
