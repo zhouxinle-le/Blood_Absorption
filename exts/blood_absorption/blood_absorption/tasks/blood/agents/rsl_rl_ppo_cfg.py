@@ -14,9 +14,9 @@ from omni.isaac.lab_tasks.utils.wrappers.rsl_rl import (
 
 @configclass
 class PsmBloodAbsorptionPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 16
-    max_iterations = 1500
-    save_interval = 50
+    num_steps_per_env = 32
+    max_iterations = 7812
+    save_interval = 100
     experiment_name = "psm_blood_absorption_direct"
     empirical_normalization = True
     policy = RslRlPpoActorCriticCfg(
@@ -30,11 +30,11 @@ class PsmBloodAbsorptionPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         use_clipped_value_loss=True,
         clip_param=0.2,
         entropy_coef=0.0,
-        num_learning_epochs=8,
-        num_mini_batches=8,
-        learning_rate=5.0e-4,
+        num_learning_epochs=4,
+        num_mini_batches=4,
+        learning_rate=2.0e-4,
         schedule="adaptive",
-        gamma=0.99,
+        gamma=0.995,
         lam=0.95,
         desired_kl=0.008,
         max_grad_norm=1.0,
