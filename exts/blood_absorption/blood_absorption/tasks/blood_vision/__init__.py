@@ -13,8 +13,8 @@ from .psm_blood_absorption_env import PsmBloodAbsorptionEnv, PsmBloodAbsorptionE
 ##
 
 gym.register(
-    id="Isaac-Psm-Blood-Absorb-Direct-v0",
-    entry_point="blood_absorption.tasks.blood:PsmBloodAbsorptionEnv",
+    id="Isaac-Psm-Blood-Vision-Direct-v0",
+    entry_point="blood_absorption.tasks.blood_vision:PsmBloodAbsorptionEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": PsmBloodAbsorptionEnvCfg,
