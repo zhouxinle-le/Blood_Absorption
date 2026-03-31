@@ -23,7 +23,7 @@ class SuctionControllerNoTimer:
         tip_pos_local_np: np.ndarray,
         tip_dir_w_np: np.ndarray,
         liquid,
-        glass2,
+        glass2_pos_np: np.ndarray,
         env_origins_np: np.ndarray,
         apply_suction_mask: np.ndarray,
     ) -> dict[str, np.ndarray]:
@@ -114,8 +114,7 @@ class SuctionControllerNoTimer:
                         ready_to_transfer=remove_mask,
                         particles_pos=particles_pos,
                         particles_vel=particles_vel,
-                        glass2=glass2,
-                        env_origins=env_origins_np,
+                        glass2_pos=glass2_pos_np[env_idx],
                     )
                 )
 
@@ -161,10 +160,8 @@ class SuctionControllerNoTimer:
         ready_to_transfer: np.ndarray,
         particles_pos: np.ndarray,
         particles_vel: np.ndarray,
-        glass2,
-        env_origins: np.ndarray,
+        glass2_pos: np.ndarray,
     ) -> int:
-        glass2_pos = glass2.data.root_pos_w[env_idx].cpu().numpy() - env_origins[env_idx]
         indices = np.where(ready_to_transfer)[0]
         random_offsets = np.random.uniform(-0.015, 0.015, (len(indices), 3))
         random_offsets[:, 2] = np.abs(random_offsets[:, 2]) + 0.01
