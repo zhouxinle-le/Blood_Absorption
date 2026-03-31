@@ -200,7 +200,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     suction_cone_range = 0.07
     suction_force_scale = 0.02
     suction_epsilon = 1e-6
-    inlet_radius = 0.008
+    inlet_radius = 0.005  # 0.008
     inlet_depth = 0.012
     use_body_quat_for_tip_dir = True
     outflow_speed = 0.02
