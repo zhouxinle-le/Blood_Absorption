@@ -1,9 +1,0 @@
-1、psm_blood_absorption_env_1 
-
-/home/le/miniconda3/envs/isaacsim-4.2/bin/python /home/le/work_space/isaac-resources/Blood/IsaacLabBloodExtension/scripts/rsl_rl/train.py --task Isaac-Psm-Blood-Absorb-Direct-v0 --num_envs 1 --device cpu --disable_fabric --enable_cameras --headless
-
-/home/le/miniconda3/envs/isaacsim-4.2/bin/python /home/le/work_space/isaac-resources/Blood/IsaacLabBloodExtension/scripts/rsl_rl/play.py --task Isaac-Psm-Blood-Absorb-Direct-v0 --num_envs 2 --device cpu --disable_fabric --enable_cameras --load_run 2026-03-27_00-04-27
-
-success_absorption_ratio = 0.75
-
-
