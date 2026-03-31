@@ -265,8 +265,6 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         self._step_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._severe_contact_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._episode_reward_sums = self._build_episode_reward_sums()
-        self._episode_raw_contact_force_sum = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-        self._episode_raw_contact_force_max = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self._episode_success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._episode_joint_limit = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._episode_severe_collision = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -778,8 +776,6 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         self._episode_reward_sums["collision_force_penalty"] -= reward_terms["collision_force_penalty"]
         self._episode_reward_sums["time_penalty"] -= reward_terms["time_penalty"]
         self._episode_reward_sums["task_complete"] += reward_terms["task_complete"]
-        self._episode_raw_contact_force_sum += raw_contact_force
-        self._episode_raw_contact_force_max = torch.maximum(self._episode_raw_contact_force_max, raw_contact_force)
 
         self.extras["log"] = {
             "Metrics/absorbed_count": task_state.absorbed_count.mean(),
@@ -808,12 +804,6 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         reward_logs = {}
         for key, values in self._episode_reward_sums.items():
             reward_logs[f"Episode_Reward/{key}"] = (values[finished_env_ids] / actual_steps).mean()
-        contact_force_logs = {
-            "Episode_Contact_Force/raw_mean": (
-                self._episode_raw_contact_force_sum[finished_env_ids] / actual_steps
-            ).mean(),
-            "Episode_Contact_Force/raw_max": self._episode_raw_contact_force_max[finished_env_ids].mean(),
-        }
 
         success_mask = self._episode_success[finished_env_ids]
         joint_limit_mask = (~success_mask) & self._episode_joint_limit[finished_env_ids]
@@ -835,7 +825,6 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             "Episode_Termination/time_out": time_out_mask.float().mean(),
         }
         self.extras["log"].update(reward_logs)
-        self.extras["log"].update(contact_force_logs)
         self.extras["log"].update(termination_logs)
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -875,8 +864,6 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         self._severe_contact_counter[env_ids] = 0
         for values in self._episode_reward_sums.values():
             values[env_ids] = 0.0
-        self._episode_raw_contact_force_sum[env_ids] = 0.0
-        self._episode_raw_contact_force_max[env_ids] = 0.0
         self._episode_success[env_ids] = False
         self._episode_joint_limit[env_ids] = False
         self._episode_severe_collision[env_ids] = False
