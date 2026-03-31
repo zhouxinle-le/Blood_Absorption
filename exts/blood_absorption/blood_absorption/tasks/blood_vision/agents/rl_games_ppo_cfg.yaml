@@ -45,7 +45,7 @@ params:
   load_path: ''
 
   config:
-    name: psm_blood_absorption_direct
+    name: psm_blood_vision_direct
     env_name: rlgpu
     device: 'cuda:0'
     device_name: 'cuda:0'
