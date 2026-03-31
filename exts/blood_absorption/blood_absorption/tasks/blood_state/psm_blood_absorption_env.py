@@ -25,7 +25,7 @@ from omni.physx import acquire_physx_interface
 from pxr import Gf
 
 from .fluid_object import FluidObject, FluidObjectCfg
-from .suction.suction_controller import SuctionControllerNoTimer
+from .suction import SuctionControllerNoTimer
 from .task_state import ParticleRewardInputs, ParticleTaskState, ParticleTaskTracker
 
 
