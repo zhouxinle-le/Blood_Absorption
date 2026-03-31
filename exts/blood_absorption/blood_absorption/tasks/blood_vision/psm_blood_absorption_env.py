@@ -27,6 +27,7 @@ from pxr import Gf
 from .fluid_object import FluidObject, FluidObjectCfg
 from .suction.suction_controller import SuctionControllerNoTimer
 from .task_state import ParticleRewardInputs, ParticleTaskState, ParticleTaskTracker
+from .vision_observation import BloodVisionObservationManager
 
 
 @configclass
@@ -258,6 +259,7 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
     def __init__(self, cfg: PsmBloodAbsorptionEnvCfg, render_mode: str | None = None, **kwargs):
         self._camera = None
         self._tip_contact_sensor = None
+        self._vision_observation = None
         self._ee_jacobi_idx: int | None = None
         super().__init__(cfg, render_mode, **kwargs)
 
@@ -349,21 +351,12 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         self._update_workspace_bounds()
 
     def _init_observation_cache(self) -> None:
-        self._obs_camera = torch.zeros(
-            (
-                self.num_envs,
-                int(self.cfg.num_channels),
-                int(self.cfg.obs_camera_height),
-                int(self.cfg.obs_camera_width),
-            ),
-            dtype=torch.float32,
+        self._vision_observation = BloodVisionObservationManager(
+            cfg=self.cfg,
+            num_envs=self.num_envs,
             device=self.device,
         )
-        self._obs_position = torch.zeros(
-            (self.num_envs, int(self.cfg.position_observation_dim)),
-            dtype=torch.float32,
-            device=self.device,
-        )
+        self._vision_observation.bind_runtime(camera=self._camera, scene=self.scene)
 
     @property
     def _particle_state(self) -> ParticleTaskState:
@@ -634,81 +627,6 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         )
         self._task_state_dirty = False
 
-    def _normalize_workspace_positions(self, pos_w: torch.Tensor) -> torch.Tensor:
-        workspace_range = (self._workspace_high_w - self._workspace_low_w).clamp_min(1.0e-6)
-        normalized = 2.0 * (pos_w - self._workspace_low_w) / workspace_range - 1.0
-        return torch.clamp(normalized, -1.0, 1.0)
-
-    def _set_fixed_camera_pose(self) -> None:
-        if self._camera is None:
-            return
-
-        eyes_tensor = torch.tensor(self.cfg.camera_pos, dtype=torch.float32, device=self.device).unsqueeze(0)
-        targets_tensor = torch.tensor(self.cfg.camera_target, dtype=torch.float32, device=self.device).unsqueeze(0)
-        eyes = self.scene.env_origins + eyes_tensor
-        targets = self.scene.env_origins + targets_tensor
-        self._camera.set_world_poses_from_view(eyes=eyes, targets=targets)
-
-    def _build_camera_observation(self) -> None:
-        if self._camera is None:
-            self._obs_camera.zero_()
-            return
-
-        camera_data = self._camera.data.output["rgb"]
-        if camera_data is None or camera_data.numel() == 0:
-            self._obs_camera.zero_()
-            return
-
-        rgb = camera_data[..., :3]
-        if rgb.dtype != torch.float32:
-            rgb = rgb.float()
-        if rgb.max() > 1.0:
-            rgb = rgb / 255.0
-
-        rgb_nchw = rgb.permute(0, 3, 1, 2).contiguous()
-        target_size = (int(self.cfg.obs_camera_height), int(self.cfg.obs_camera_width))
-        if tuple(rgb_nchw.shape[-2:]) == target_size:
-            self._obs_camera[:] = rgb_nchw
-        else:
-            self._obs_camera[:] = torch.nn.functional.interpolate(
-                rgb_nchw,
-                size=target_size,
-                mode="bilinear",
-                align_corners=False,
-            )
-
-    def _build_position_observation(
-        self,
-        tip_pos_w: torch.Tensor,
-        tip_dir_w: torch.Tensor,
-        contact_force: torch.Tensor,
-    ) -> torch.Tensor:
-        tip_pos_normalized = self._normalize_workspace_positions(tip_pos_w)
-        workspace_range = (self._workspace_high_w - self._workspace_low_w).clamp_min(1.0e-6)
-        goal_error_normalized = torch.clamp(2.0 * (self._ee_goal_pos_w - tip_pos_w) / workspace_range, -1.0, 1.0)
-        contact_ratio = torch.clamp(
-            contact_force / max(float(self.cfg.severe_contact_force_threshold), 1.0e-6),
-            min=0.0,
-            max=1.0,
-        ).unsqueeze(1)
-        step_ratio = torch.clamp(
-            self._step_count.to(dtype=torch.float32) / max(float(self.max_episode_length), 1.0),
-            min=0.0,
-            max=1.0,
-        ).unsqueeze(1)
-
-        return torch.cat(
-            (
-                tip_pos_normalized,
-                goal_error_normalized,
-                tip_dir_w,
-                self._raw_actions,
-                contact_ratio,
-                step_ratio,
-            ),
-            dim=1,
-        )
-
     def _compute_termination_flags(
         self, contact_force: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
@@ -929,13 +847,12 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         self._episode_time_out[env_ids] = False
         self._raw_actions[env_ids] = 0.0
         self._ik_commands[env_ids] = 0.0
-        self._obs_camera[env_ids] = 0.0
-        self._obs_position[env_ids] = 0.0
+        self._vision_observation.reset(env_ids)
 
         tip_pos_w, _ = self._compute_tip_pose_and_direction_w()
         self._ee_goal_pos_w[env_ids] = tip_pos_w[env_ids]
         self._particle_task_tracker.reset(env_ids, tip_pos_w)
-        self._set_fixed_camera_pose()
+        self._vision_observation.set_fixed_camera_pose()
         self._set_task_state_dirty()
 
     def _get_observations(self) -> dict:
@@ -947,9 +864,17 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             self._ee_goal_pos_w[reset_goal_mask] = tip_pos_w[reset_goal_mask]
             contact_force = self._get_tip_contact_force()
 
-            self._set_fixed_camera_pose()
-            self._build_camera_observation()
-            self._obs_position[:] = self._build_position_observation(tip_pos_w, tip_dir_w, contact_force)
+            self._vision_observation.update(
+                tip_pos_w=tip_pos_w,
+                tip_dir_w=tip_dir_w,
+                ee_goal_pos_w=self._ee_goal_pos_w,
+                workspace_low_w=self._workspace_low_w,
+                workspace_high_w=self._workspace_high_w,
+                raw_actions=self._raw_actions,
+                contact_force=contact_force,
+                step_count=self._step_count,
+                max_episode_length=self.max_episode_length,
+            )
 
             if not self.liquid.has_initial_state:
                 particles_pos, _ = self.liquid.read_particles(0)
@@ -960,8 +885,5 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             self._observation_pending = False
 
         return {
-            "policy": {
-                "camera": self._obs_camera.clone(),
-                "position": self._obs_position.clone(),
-            }
+            "policy": self._vision_observation.get_observations()
         }
