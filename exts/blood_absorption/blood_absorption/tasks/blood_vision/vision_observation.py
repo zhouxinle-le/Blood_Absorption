@@ -71,10 +71,13 @@ class BloodVisionObservationManager:
             return
 
         rgb = camera_data[..., :3]
-        if rgb.dtype != torch.float32:
-            rgb = rgb.float()
-        if rgb.max() > 1.0:
-            rgb = rgb / 255.0
+        if camera_data.dtype == torch.uint8:
+            rgb = rgb.float() / 255.0
+        else:
+            if rgb.dtype != torch.float32:
+                rgb = rgb.float()
+            if rgb.max() > 1.0:
+                rgb = rgb / 255.0
 
         rgb_nchw = rgb.permute(0, 3, 1, 2).contiguous()
         target_size = (int(self.cfg.obs_camera_height), int(self.cfg.obs_camera_width))
@@ -142,7 +145,6 @@ class BloodVisionObservationManager:
         step_count: torch.Tensor,
         max_episode_length: int,
     ) -> None:
-        self.set_fixed_camera_pose()
         self._build_camera_observation()
         self._obs_position[:] = self._build_position_observation(
             tip_pos_w=tip_pos_w,

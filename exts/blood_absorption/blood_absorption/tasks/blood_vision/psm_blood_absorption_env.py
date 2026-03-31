@@ -608,13 +608,14 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         tip_pos_local_np = (tip_pos_w - self.scene.env_origins).detach().cpu().numpy()
         tip_dir_w_np = tip_dir_w.detach().cpu().numpy()
         apply_suction_mask_np = (self._step_count > 0).detach().cpu().numpy()
+        glass2_pos_np = (self._glass2.data.root_pos_w - self.scene.env_origins).detach().cpu().numpy()
 
         # 一步运算，拿到吸血结果和当前统计指标
         particle_stats = self._suction_controller.step(
             tip_pos_local_np=tip_pos_local_np,
             tip_dir_w_np=tip_dir_w_np,
             liquid=self.liquid,
-            glass2=self._glass2,
+            glass2_pos_np=glass2_pos_np,
             env_origins_np=env_origins_np,
             apply_suction_mask=apply_suction_mask_np,
         )
