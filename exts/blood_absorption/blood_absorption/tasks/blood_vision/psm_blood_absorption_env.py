@@ -209,7 +209,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     reward_absorb_weight = 60
     centroid_progress_weight = 100.0
     centroid_progress_clip = 0.02
-    reward_cone_coverage_weight = 0.0  # 0.5,环境3
+    reward_cone_coverage_weight = 0.0  
     reward_inlet_coverage_weight = 0.0
     reward_action_weight = 0.02
     reward_time_penalty = 0.01

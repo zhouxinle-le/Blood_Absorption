@@ -209,8 +209,6 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     reward_absorb_weight = 60
     centroid_progress_weight = 100.0
     centroid_progress_clip = 0.02
-    reward_cone_coverage_weight = 0.0  # 0.5,环境3
-    reward_inlet_coverage_weight = 0.0
     reward_action_weight = 0.02
     reward_time_penalty = 0.01
     reward_task_complete = 40.0
@@ -253,8 +251,6 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         return {
             "absorb_reward": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
             "centroid_progress_reward": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
-            "cone_coverage_reward": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
-            "inlet_coverage_reward": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
             "action_penalty": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
             "collision_force_penalty": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
             "time_penalty": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
@@ -712,8 +708,6 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         )
         centroid_progress_reward = self.cfg.centroid_progress_weight * centroid_progress
 
-        cone_coverage_reward = self.cfg.reward_cone_coverage_weight * task_state.valid_in_cone_ratio
-        inlet_coverage_reward = self.cfg.reward_inlet_coverage_weight * task_state.valid_in_inlet_ratio
         action_penalty = self.cfg.reward_action_weight * torch.sum(reward_inputs.raw_actions**2, dim=1)
 
         safe_contact_force = torch.log1p(torch.clamp(reward_inputs.contact_force, min=0.0))
@@ -734,8 +728,6 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             task_complete
             + absorb_reward
             + centroid_progress_reward
-            + cone_coverage_reward
-            + inlet_coverage_reward
             - action_penalty
             - collision_force_penalty
             - time_penalty
@@ -744,8 +736,6 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         return {
             "absorb_reward": absorb_reward,
             "centroid_progress_reward": centroid_progress_reward,
-            "cone_coverage_reward": cone_coverage_reward,
-            "inlet_coverage_reward": inlet_coverage_reward,
             "action_penalty": action_penalty,
             "collision_force_penalty": collision_force_penalty,
             "time_penalty": time_penalty,
@@ -770,8 +760,6 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
 
         self._episode_reward_sums["absorb_reward"] += reward_terms["absorb_reward"]
         self._episode_reward_sums["centroid_progress_reward"] += reward_terms["centroid_progress_reward"]
-        self._episode_reward_sums["cone_coverage_reward"] += reward_terms["cone_coverage_reward"]
-        self._episode_reward_sums["inlet_coverage_reward"] += reward_terms["inlet_coverage_reward"]
         self._episode_reward_sums["action_penalty"] -= reward_terms["action_penalty"]
         self._episode_reward_sums["collision_force_penalty"] -= reward_terms["collision_force_penalty"]
         self._episode_reward_sums["time_penalty"] -= reward_terms["time_penalty"]

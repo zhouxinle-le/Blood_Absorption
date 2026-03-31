@@ -17,7 +17,7 @@ class PsmBloodAbsorptionPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 32
     max_iterations = 7812
     save_interval = 100
-    experiment_name = "psm_blood_absorption_direct"
+    experiment_name = "psm_blood_state_direct"
     empirical_normalization = True
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
