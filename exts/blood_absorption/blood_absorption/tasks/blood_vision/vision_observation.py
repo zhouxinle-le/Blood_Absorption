@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
+import numpy as np
 import torch
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 
 class BloodVisionObservationManager:
@@ -15,6 +22,12 @@ class BloodVisionObservationManager:
 
         self._camera: Any | None = None
         self._scene: Any | None = None
+        self._show_policy_input_image = bool(getattr(self.cfg, "show_policy_input_image", False))
+        self._policy_input_window_name = str(getattr(self.cfg, "policy_input_window_name", "Policy Input - Env 0"))
+        self._policy_input_display_available = cv2 is not None and (
+            os.environ.get("DISPLAY") is not None or os.environ.get("WAYLAND_DISPLAY") is not None
+        )
+        self._policy_input_warning_emitted = False
 
         self._obs_camera = torch.zeros(
             (
@@ -91,6 +104,30 @@ class BloodVisionObservationManager:
                 align_corners=False,
             )
 
+    def _display_policy_input_image(self, policy_camera_tensor: torch.Tensor) -> None:
+        if not self._show_policy_input_image:
+            return
+        if not self._policy_input_display_available:
+            if not self._policy_input_warning_emitted:
+                print("[WARN] Policy input image display disabled because OpenCV GUI/display is unavailable.")
+                self._policy_input_warning_emitted = True
+            return
+        if policy_camera_tensor.numel() == 0 or policy_camera_tensor.shape[0] == 0:
+            return
+
+        img = policy_camera_tensor[0].detach().float().cpu().clamp(0.0, 1.0).permute(1, 2, 0).numpy()
+        img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
+
+        try:
+            img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            cv2.imshow(self._policy_input_window_name, img_bgr)
+            cv2.waitKey(1)
+        except cv2.error as exc:
+            if not self._policy_input_warning_emitted:
+                print(f"[WARN] Failed to display policy input image: {exc}")
+                self._policy_input_warning_emitted = True
+            self._policy_input_display_available = False
+
     def _build_position_observation(
         self,
         tip_pos_w: torch.Tensor,
@@ -146,6 +183,7 @@ class BloodVisionObservationManager:
         max_episode_length: int,
     ) -> None:
         self._build_camera_observation()
+        self._display_policy_input_image(self._obs_camera)
         self._obs_position[:] = self._build_position_observation(
             tip_pos_w=tip_pos_w,
             tip_dir_w=tip_dir_w,
@@ -163,3 +201,11 @@ class BloodVisionObservationManager:
             "camera": self._obs_camera.clone(),
             "position": self._obs_position.clone(),
         }
+
+    def close(self) -> None:
+        if not self._show_policy_input_image or cv2 is None:
+            return
+        try:
+            cv2.destroyWindow(self._policy_input_window_name)
+        except cv2.error:
+            return

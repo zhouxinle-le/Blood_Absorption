@@ -34,12 +34,18 @@ from .vision_observation import BloodVisionObservationManager
 class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     episode_length_s = 10
     decimation = 2
+
     action_space = 3
     state_space = 0
+
     num_channels = 3
     obs_camera_height = 128
     obs_camera_width = 128
     position_observation_dim = 14
+
+    show_policy_input_image = True
+    policy_input_window_name = "Policy Input - Env 0"
+    
     observation_space = {
         "camera": [num_channels, obs_camera_height, obs_camera_width],
         "position": position_observation_dim,
@@ -357,6 +363,11 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             device=self.device,
         )
         self._vision_observation.bind_runtime(camera=self._camera, scene=self.scene)
+
+    def close(self):
+        if self._vision_observation is not None:
+            self._vision_observation.close()
+        return super().close()
 
     @property
     def _particle_state(self) -> ParticleTaskState:
