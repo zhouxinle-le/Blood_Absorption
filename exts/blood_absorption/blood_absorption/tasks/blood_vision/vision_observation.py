@@ -15,6 +15,8 @@ except ImportError:
 class BloodVisionObservationManager:
     """Builds camera + proprio observations for the blood vision task."""
 
+    _POSITION_OBSERVATION_DIM = 11
+
     def __init__(self, cfg, num_envs: int, device: torch.device | str):
         self.cfg = cfg
         self.num_envs = int(num_envs)
@@ -44,6 +46,11 @@ class BloodVisionObservationManager:
             dtype=torch.float32,
             device=self.device,
         )
+        if int(self.cfg.position_observation_dim) != self._POSITION_OBSERVATION_DIM:
+            raise ValueError(
+                "blood_vision position_observation_dim must match the assembled proprioception features "
+                f"({self._POSITION_OBSERVATION_DIM}), got {self.cfg.position_observation_dim}"
+            )
 
     def bind_runtime(self, camera: Any, scene: Any) -> None:
         self._camera = camera
@@ -135,7 +142,6 @@ class BloodVisionObservationManager:
         ee_goal_pos_w: torch.Tensor,
         workspace_low_w: torch.Tensor,
         workspace_high_w: torch.Tensor,
-        raw_actions: torch.Tensor,
         contact_force: torch.Tensor,
         step_count: torch.Tensor,
         max_episode_length: int,
@@ -163,7 +169,6 @@ class BloodVisionObservationManager:
                 tip_pos_normalized,
                 goal_error_normalized,
                 tip_dir_w,
-                raw_actions,
                 contact_ratio,
                 step_ratio,
             ),
@@ -177,7 +182,6 @@ class BloodVisionObservationManager:
         ee_goal_pos_w: torch.Tensor,
         workspace_low_w: torch.Tensor,
         workspace_high_w: torch.Tensor,
-        raw_actions: torch.Tensor,
         contact_force: torch.Tensor,
         step_count: torch.Tensor,
         max_episode_length: int,
@@ -190,7 +194,6 @@ class BloodVisionObservationManager:
             ee_goal_pos_w=ee_goal_pos_w,
             workspace_low_w=workspace_low_w,
             workspace_high_w=workspace_high_w,
-            raw_actions=raw_actions,
             contact_force=contact_force,
             step_count=step_count,
             max_episode_length=max_episode_length,

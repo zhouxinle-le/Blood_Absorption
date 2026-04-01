@@ -41,7 +41,9 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     num_channels = 3
     obs_camera_height = 128
     obs_camera_width = 128
-    position_observation_dim = 14
+    # tip position (3) + controller tracking error (3) + tip direction (3)
+    # + contact ratio (1) + episode progress (1)
+    position_observation_dim = 11
 
     show_policy_input_image = True
     policy_input_window_name = "Policy Input - Env 0"
@@ -73,7 +75,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
         replicate_physics=False,
     )
 
-    camera_pos = (0.0, 0.42, 1.15)
+    camera_pos = (0.0, 0.42, 1.20)
     camera_target = (0.0, 0.30, 0.96)
     camera: TiledCameraCfg = TiledCameraCfg(
         prim_path="/World/envs/env_.*/Camera",
@@ -234,7 +236,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     suction_cone_range = 0.07
     suction_force_scale = 0.02
     suction_epsilon = 1e-6
-    inlet_radius = 0.005  # 0.008
+    inlet_radius = 0.006  # 0.008
     inlet_depth = 0.012
     use_body_quat_for_tip_dir = True
     outflow_speed = 0.02
@@ -882,7 +884,6 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
                 ee_goal_pos_w=self._ee_goal_pos_w,
                 workspace_low_w=self._workspace_low_w,
                 workspace_high_w=self._workspace_high_w,
-                raw_actions=self._raw_actions,
                 contact_force=contact_force,
                 step_count=self._step_count,
                 max_episode_length=self.max_episode_length,
