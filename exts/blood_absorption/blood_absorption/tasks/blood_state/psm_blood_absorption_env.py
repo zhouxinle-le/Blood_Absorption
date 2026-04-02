@@ -130,7 +130,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     psm_robot = ArticulationCfg(
         prim_path="/World/envs/env_.*/PSM",
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{CURRENT_PATH}/usd_models/psm_all.usd",
+            usd_path=f"{CURRENT_PATH}/usd_models/psm_all_2.usd",
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
@@ -176,6 +176,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     )
 
     ik_joint_names = (
+        "psm_rev_joint",
         "psm_yaw_joint",
         "psm_pitch_end_joint",
         "psm_main_insertion_joint",
@@ -200,7 +201,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     suction_cone_range = 0.07
     suction_force_scale = 0.02
     suction_epsilon = 1e-6
-    inlet_radius = 0.005  # 0.008
+    inlet_radius = 0.006  # 0.008
     inlet_depth = 0.012
     use_body_quat_for_tip_dir = True
     outflow_speed = 0.02
