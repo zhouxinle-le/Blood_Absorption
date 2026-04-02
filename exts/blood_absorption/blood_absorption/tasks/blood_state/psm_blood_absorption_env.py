@@ -840,10 +840,16 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             if len(particles_pos) > 0:
                 self.liquid.capture_initial_state(env_id=0)
 
+        root_state = self._psm.data.default_root_state[env_ids].clone()
+        root_state[:, :3] += self.scene.env_origins[env_ids]
+        self._psm.write_root_pose_to_sim(root_state[:, :7], env_ids=env_ids)
+        self._psm.write_root_velocity_to_sim(root_state[:, 7:], env_ids=env_ids)
+
         joint_pos = self._psm.data.default_joint_pos[env_ids]
-        joint_vel = torch.zeros_like(joint_pos)
+        joint_vel = self._psm.data.default_joint_vel[env_ids]
         self._psm.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
         self._psm.set_joint_position_target(joint_pos, env_ids=env_ids)
+        self._psm.reset(env_ids=env_ids)
         self._joint_pos_des[env_ids] = joint_pos[:, self._ik_joint_ids]
 
         self._randomize_tissue_and_blood(env_ids)
