@@ -212,12 +212,14 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     )
 
     ik_joint_names = (
-        # "psm_rev_joint",
+        "psm_rev_joint",
         "psm_yaw_joint",
         "psm_pitch_end_joint",
         "psm_main_insertion_joint",
     )
     tool_joint_names = (
+        "psm_pitch_back_joint",
+        "psm_pitch_bottom_joint",
         "suction_tool_pitch_joint",
         "suction_tool_end_joint",
     )
