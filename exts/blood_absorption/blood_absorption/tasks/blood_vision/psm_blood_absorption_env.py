@@ -166,7 +166,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     psm_robot = ArticulationCfg(
         prim_path="/World/envs/env_.*/PSM",
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{CURRENT_PATH}/usd_models/psm_all.usd",
+            usd_path=f"{CURRENT_PATH}/usd_models/psm_all_2.usd",
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
