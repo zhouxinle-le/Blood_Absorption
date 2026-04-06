@@ -45,7 +45,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     # + contact ratio (1) + episode progress (1)
     position_observation_dim = 11
 
-    show_policy_input_image = False
+    show_policy_input_image = True
     policy_input_window_name = "Policy Input - Env 0"
     
     observation_space = {
@@ -75,7 +75,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
         replicate_physics=False,
     )
 
-    camera_pos = (0.0, 0.36, 1.20)
+    camera_pos = (0.0, 0.42, 1.20)      # camera_pos = (0.0, 0.36, 1.20)
     camera_target = (0.0, 0.30, 0.96)
     camera: TiledCameraCfg = TiledCameraCfg(
         prim_path="/World/envs/env_.*/Camera",
@@ -212,12 +212,12 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     )
 
     ik_joint_names = (
-        "psm_rev_joint",
         "psm_yaw_joint",
         "psm_pitch_end_joint",
         "psm_main_insertion_joint",
     )
     tool_joint_names = (
+        "psm_rev_joint",
         "psm_pitch_back_joint",
         "psm_pitch_bottom_joint",
         "suction_tool_pitch_joint",

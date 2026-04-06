@@ -36,9 +36,10 @@ class BloodVisionActorCritic(nn.Module):
         num_actor_obs: int,
         num_critic_obs: int,
         num_actions: int,
-        actor_hidden_dims: Sequence[int] = (256, 128, 64),
-        critic_hidden_dims: Sequence[int] = (256, 128, 64),
+        actor_hidden_dims: Sequence[int] = (512, 256, 128),
+        critic_hidden_dims: Sequence[int] = (512, 256, 128),
         activation: str = "elu",
+        cnn_activation: str = "relu",
         init_noise_std: float = 1.0,
         noise_std_type: str = "scalar",
         camera_shape: Sequence[int] = (3, 128, 128),
@@ -71,17 +72,18 @@ class BloodVisionActorCritic(nn.Module):
             )
 
         activation_module = resolve_nn_activation(activation)
+        cnn_activation_module = resolve_nn_activation(cnn_activation)
         cnn_channels = [int(v) for v in cnn_channels]
         if len(cnn_channels) != 3:
             raise ValueError(f"cnn_channels must contain exactly 3 entries, got {cnn_channels}.")
 
         self.image_encoder = nn.Sequential(
             nn.Conv2d(self.camera_shape[0], cnn_channels[0], kernel_size=10, stride=5, padding=0),
-            activation_module.__class__(),
+            cnn_activation_module.__class__(),
             nn.Conv2d(cnn_channels[0], cnn_channels[1], kernel_size=5, stride=3, padding=0),
-            activation_module.__class__(),
+            cnn_activation_module.__class__(),
             nn.Conv2d(cnn_channels[1], cnn_channels[2], kernel_size=4, stride=2, padding=0),
-            activation_module.__class__(),
+            cnn_activation_module.__class__(),
             nn.Flatten(),
         )
 

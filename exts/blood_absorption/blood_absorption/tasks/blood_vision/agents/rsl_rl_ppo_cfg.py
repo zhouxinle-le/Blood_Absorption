@@ -14,15 +14,15 @@ from omni.isaac.lab_tasks.utils.wrappers.rsl_rl import (
 
 @configclass
 class PsmBloodAbsorptionPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 32
+    num_steps_per_env = 64
     max_iterations = 7812
     save_interval = 100
     experiment_name = "psm_blood_vision_direct"
-    empirical_normalization = True
+    empirical_normalization = False
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=1.0,
-        actor_hidden_dims=[256, 128, 64],
-        critic_hidden_dims=[256, 128, 64],
+        init_noise_std=0.55,
+        actor_hidden_dims=[512, 256, 128],
+        critic_hidden_dims=[512, 256, 128],
         activation="elu",
     )
     policy.noise_std_type = "log"
@@ -37,6 +37,6 @@ class PsmBloodAbsorptionPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         schedule="adaptive",
         gamma=0.995,
         lam=0.95,
-        desired_kl=0.008,
+        desired_kl=0.02,
         max_grad_norm=1.0,
     )
