@@ -239,26 +239,27 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     suction_cone_range = 0.07
     suction_force_scale = 0.02
     suction_epsilon = 1e-6
-    inlet_radius = 0.006  # 0.008
+    inlet_radius = 0.008  # 0.008
     inlet_depth = 0.012
     use_body_quat_for_tip_dir = True
     outflow_speed = 0.02
     max_particle_speed = 0.4
 
-    reward_absorb_weight = 60
+    reward_absorb_weight = 75.0
     centroid_progress_weight = 100.0
     centroid_progress_clip = 0.02
     reward_cone_coverage_weight = 0.0  
     reward_inlet_coverage_weight = 0.0
     reward_action_weight = 0.02
     reward_time_penalty = 0.01
-    reward_task_complete = 40.0
+    reward_task_complete = 25.0
     reward_collision_force_weight = 0.20
+    reward_joint_limit_penalty = 10.0
     absorbed_delta_ema_alpha = 0.2
     severe_contact_force_threshold = 2.0
     severe_contact_patience = 2
 
-    success_absorption_ratio = 0.97
+    success_absorption_ratio = 0.96
     joint_limit_termination_tolerance = 1e-3
 
 
@@ -299,6 +300,7 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             "action_penalty": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
             "collision_force_penalty": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
             "time_penalty": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
+            "joint_limit_penalty": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
             "task_complete": torch.zeros(self.num_envs, dtype=torch.float32, device=self.device),
         }
 
@@ -716,6 +718,9 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             safe_contact_force - safe_contact_threshold,
             min=0.0,
         )
+        joint_limit_penalty = float(self.cfg.reward_joint_limit_penalty) * (
+            self._episode_joint_limit & (~self._episode_success)
+        ).float()
 
         time_penalty = torch.full(
             (self.num_envs,),
@@ -732,6 +737,7 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             + inlet_coverage_reward
             - action_penalty
             - collision_force_penalty
+            - joint_limit_penalty
             - time_penalty
         ).float()
 
@@ -742,6 +748,7 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             "inlet_coverage_reward": inlet_coverage_reward,
             "action_penalty": action_penalty,
             "collision_force_penalty": collision_force_penalty,
+            "joint_limit_penalty": joint_limit_penalty,
             "time_penalty": time_penalty,
             "task_complete": task_complete,
             "total_reward": total_reward,
@@ -768,6 +775,7 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         self._episode_reward_sums["inlet_coverage_reward"] += reward_terms["inlet_coverage_reward"]
         self._episode_reward_sums["action_penalty"] -= reward_terms["action_penalty"]
         self._episode_reward_sums["collision_force_penalty"] -= reward_terms["collision_force_penalty"]
+        self._episode_reward_sums["joint_limit_penalty"] -= reward_terms["joint_limit_penalty"]
         self._episode_reward_sums["time_penalty"] -= reward_terms["time_penalty"]
         self._episode_reward_sums["task_complete"] += reward_terms["task_complete"]
 
