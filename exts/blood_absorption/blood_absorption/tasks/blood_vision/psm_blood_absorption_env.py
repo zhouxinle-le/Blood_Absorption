@@ -45,7 +45,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     # + contact ratio (1) + episode progress (1)
     position_observation_dim = 11
 
-    show_policy_input_image = True
+    show_policy_input_image = False
     policy_input_window_name = "Policy Input - Env 0"
     
     observation_space = {

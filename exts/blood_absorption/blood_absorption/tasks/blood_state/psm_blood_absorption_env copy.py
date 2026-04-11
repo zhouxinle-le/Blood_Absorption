@@ -70,7 +70,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/TissueSetup",
         init_state=RigidObjectCfg.InitialStateCfg(pos=spawn_pos_tissue, rot=[1, 0, 0, 0]),
         spawn=UsdFileCfg(
-            usd_path=f"{CURRENT_PATH}/usd_models/single_tissue.usd",
+            usd_path=f"{CURRENT_PATH}/usd_models/whole_sence_no_rigid.usd",
             scale=(1.0, 1.0, 1.0),
             rigid_props=RigidBodyPropertiesCfg(
                 disable_gravity=True,
@@ -198,7 +198,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     psm_tip_local_axis = (0.0, -1.0, 0.0)
     tip_contact_force_threshold = 0.5
     height_axis = 2
-    height_limit = 0.90
+    height_limit = 0.92
     suction_cone_half_angle_deg = 60.0
     suction_cone_range = 0.07
     suction_force_scale = 0.02
@@ -411,7 +411,7 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         )
 
         lift = Gf.Vec3f(0.0, 0.0, self.cfg.table_height_offset)
-        spawn_pos_tissue = self.cfg.spawn_pos_tissue + lift + Gf.Vec3f(0.0, 0.0, 0.039)
+        spawn_pos_tissue = self.cfg.spawn_pos_tissue + lift
         spawn_pos_fluid = self.cfg.spawn_pos_fluid + lift
         spawn_pos_glass2 = self.cfg.spawn_pos_glass2
 
