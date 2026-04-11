@@ -8,8 +8,9 @@ import torch
 
 import carb.settings
 import omni.isaac.lab.sim as sim_utils
+from omni.isaac.core.prims import XFormPrimView
 from omni.isaac.lab.actuators.actuator_cfg import ImplicitActuatorCfg
-from omni.isaac.lab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
+from omni.isaac.lab.assets import Articulation, ArticulationCfg, AssetBaseCfg, RigidObject, RigidObjectCfg
 from omni.isaac.lab.controllers import DifferentialIKController, DifferentialIKControllerCfg
 from omni.isaac.lab.envs import DirectRLEnv, DirectRLEnvCfg
 from omni.isaac.lab.managers import SceneEntityCfg
@@ -102,16 +103,12 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     spawn_pos_glass2 = Gf.Vec3f(0.0, 0.70, 0.01)
     glass2_particle_height = 0.03
 
-    tissue = RigidObjectCfg(
+    tissue = AssetBaseCfg(
         prim_path="/World/envs/env_.*/TissueSetup",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=spawn_pos_tissue, rot=[1, 0, 0, 0]),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=spawn_pos_tissue, rot=[1, 0, 0, 0]),
         spawn=UsdFileCfg(
-            usd_path=f"{CURRENT_PATH}/usd_models/whole_sence_no_rigid.usd",
+            usd_path=f"{CURRENT_PATH}/usd_models/single_tissue_no_rigid.usd",
             scale=(1.0, 1.0, 1.0),
-            rigid_props=RigidBodyPropertiesCfg(
-                disable_gravity=True,
-                kinematic_enabled=True,
-            ),
         ),
     )
 
@@ -416,10 +413,16 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
             env_count, float(self.cfg.blood_randomization_xy_range)
         )
 
-        tissue_root_state = self._tissue.data.default_root_state.clone()[env_ids]
-        tissue_root_state[:, :3] += self.scene.env_origins[env_ids]
-        tissue_root_state[:, :3] += tissue_offsets
-        self._tissue.write_root_pose_to_sim(tissue_root_state[:, :7], env_ids=env_ids)
+        tissue_positions = torch.tensor(
+            tuple(self.cfg.tissue.init_state.pos), dtype=torch.float32, device=self.device
+        ).repeat(env_count, 1)
+        tissue_positions += self.scene.env_origins[env_ids]
+        tissue_positions += tissue_offsets
+        tissue_orientations = torch.tensor(
+            tuple(self.cfg.tissue.init_state.rot), dtype=torch.float32, device=self.device
+        ).repeat(env_count, 1)
+        env_id_list = env_ids.detach().cpu().tolist()
+        self._tissue.set_world_poses(tissue_positions, tissue_orientations, env_id_list)
 
         initial_state = self.liquid.get_initial_state()
         if initial_state is None:
@@ -427,7 +430,6 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
 
         initial_particles_pos, initial_particles_vel = initial_state
         total_offsets_xy = (tissue_offsets[:, :2] + blood_offsets[:, :2]).detach().cpu().numpy()
-        env_id_list = env_ids.detach().cpu().tolist()
         for index, env_id in enumerate(env_id_list):
             particles_pos = np.array(initial_particles_pos, copy=True)
             particles_vel = np.array(initial_particles_vel, copy=True)
@@ -461,7 +463,7 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         )
 
         lift = Gf.Vec3f(0.0, 0.0, self.cfg.table_height_offset)
-        spawn_pos_tissue = self.cfg.spawn_pos_tissue + lift
+        spawn_pos_tissue = self.cfg.spawn_pos_tissue + lift + Gf.Vec3f(0.0, 0.0, 0.039)
         spawn_pos_fluid = self.cfg.spawn_pos_fluid + lift
         spawn_pos_glass2 = self.cfg.spawn_pos_glass2
 
@@ -469,8 +471,14 @@ class PsmBloodAbsorptionEnv(DirectRLEnv):
         self.liquid.spawn_fluid_direct()
 
         self.cfg.tissue.init_state.pos = spawn_pos_tissue
-        self._tissue = RigidObject(self.cfg.tissue)
-        self.scene.rigid_objects["tissue"] = self._tissue
+        self.cfg.tissue.spawn.func(
+            self.cfg.tissue.prim_path,
+            self.cfg.tissue.spawn,
+            translation=self.cfg.tissue.init_state.pos,
+            orientation=self.cfg.tissue.init_state.rot,
+        )
+        self._tissue = XFormPrimView(self.cfg.tissue.prim_path, reset_xform_properties=False)
+        self.scene.extras["tissue"] = self._tissue
 
         self.cfg.glass2.init_state.pos = spawn_pos_glass2
         self._glass2 = RigidObject(self.cfg.glass2)
