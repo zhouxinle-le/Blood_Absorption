@@ -127,7 +127,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     psm_robot = ArticulationCfg(
         prim_path="/World/envs/env_.*/PSM",
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{CURRENT_PATH}/usd_models/psm_2.usd",
+            usd_path=f"{CURRENT_PATH}/usd_models/psm_3.usd",
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
@@ -173,12 +173,13 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     )
 
     ik_joint_names = (
-        "psm_rev_joint",
+        # "psm_rev_joint",
         "psm_yaw_joint",
         "psm_pitch_end_joint",
         "psm_main_insertion_joint",
     )
     tool_joint_names = (
+        "psm_rev_joint",
         "psm_pitch_back_joint",
         "psm_pitch_bottom_joint",
         "suction_tool_pitch_joint",
@@ -187,7 +188,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     action_scale_lin = 0.003
     workspace_low_offset = (-0.20, -0.20, -0.02)
     workspace_high_offset = (0.20, 0.20, 0.30)
-    tissue_randomization_xy_range = 0.08
+    tissue_randomization_xy_range = 0.07
     blood_randomization_xy_range = 0.02
 
     psm_tip_body_name = "suction_tool_end_link"

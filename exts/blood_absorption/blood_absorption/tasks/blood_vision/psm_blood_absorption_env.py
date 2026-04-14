@@ -46,7 +46,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     # + contact ratio (1) + episode progress (1)
     position_observation_dim = 11
 
-    show_policy_input_image = False
+    show_policy_input_image = True
     policy_input_window_name = "Policy Input - Env 0"
     
     observation_space = {
@@ -77,7 +77,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     )
 
     camera_pos = (0.0, 0.42, 1.20)      # camera_pos = (0.0, 0.36, 1.20)
-    camera_target = (0.0, 0.30, 0.96)
+    camera_target = (0.0, 0.30, 0.953)
     camera: TiledCameraCfg = TiledCameraCfg(
         prim_path="/World/envs/env_.*/Camera",
         offset=TiledCameraCfg.OffsetCfg(
@@ -99,7 +99,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     CURRENT_PATH = os.path.dirname(os.path.realpath(__file__))
 
     spawn_pos_tissue = Gf.Vec3f(0.0, 0.30, 0.0)
-    spawn_pos_fluid = spawn_pos_tissue + Gf.Vec3f(0.0, 0.0, 0.05)
+    spawn_pos_fluid = spawn_pos_tissue + Gf.Vec3f(0.0, 0.0, 0.04)
     spawn_pos_glass2 = Gf.Vec3f(0.0, 0.70, 0.01)
     glass2_particle_height = 0.03
 
@@ -223,7 +223,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     action_scale_lin = 0.003
     workspace_low_offset = (-0.20, -0.20, -0.02)
     workspace_high_offset = (0.20, 0.20, 0.30)
-    tissue_randomization_xy_range = 0.08
+    tissue_randomization_xy_range = 0.06
     blood_randomization_xy_range = 0.02
 
     psm_tip_body_name = "suction_tool_end_link"
@@ -231,7 +231,7 @@ class PsmBloodAbsorptionEnvCfg(DirectRLEnvCfg):
     psm_tip_local_axis = (0.0, -1.0, 0.0)
     tip_contact_force_threshold = 0.5
     height_axis = 2
-    height_limit = 0.92
+    height_limit = 0.90
     suction_cone_half_angle_deg = 60.0
     suction_cone_range = 0.07
     suction_force_scale = 0.02
